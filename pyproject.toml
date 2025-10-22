@@ -13,18 +13,20 @@ dependencies = [
     "torch==2.7.1",
     "multiprocess",
     "scipy>=1.16.2",
-    "opencv-python>=4.11.0.86",
+    "opencv-python==4.5.5.64",
     "pygame>=2.6.1",
     "transforms3d>=0.4.2",
     "pynput>=1.8.1",
     "sharedmemory>=1.6.0",
     "open3d>=0.19.0",
     "sapien>=3.0.1",
-    "pyrealsense2>=2.56.5.9235",
+    "pyrealsense2==2.55.1.6486",
     "atomics>=1.0.3",
     "xarm-python-sdk>=1.17.0",
     "dynamixel-sdk",
     "zmq>=0.0.0",
+    "pip>=25.2",
+    "opencv-contrib-python>=4.11.0.86",
 ]
 
 [tool.setuptools.packages.find]

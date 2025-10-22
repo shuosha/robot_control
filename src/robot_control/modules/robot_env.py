@@ -666,12 +666,10 @@ class RobotEnv(mp.Process):
                         robot_action_record_dir
                     )
 
-                if perception_out is None:
+                if perception_out is not None:
                     for k, v in perception_out['value'].items():
                         rgbs[k] = v["color"]
                         depths[k] = v["depth"]
-
-                        print("k here is :", k)
 
                 # Build raw full RGB+depth image (original behavior)
                 row_imgs = []

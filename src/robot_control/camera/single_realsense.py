@@ -432,7 +432,7 @@ class SingleRealsense(mp.Process):
                         # put_data['timestamp'] = receive_time
                         put_data['timestamp'] = capture_time
                         # print(step_idx, data['timestamp'])
-                        self.ring_buffer.put(put_data, wait=True, serial_number=self.serial_number)
+                        self.ring_buffer.put(put_data, wait=False, serial_number=self.serial_number)
                 else:
                     # step_idx = int((receive_time - put_start_time) * self.put_fps)
                     # print(step_idx, receive_time)
