@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "robot-control"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "numpy==1.26.4",
+    "torch==2.7.1",
+    "multiprocess",
+    "scipy>=1.16.2",
+    "opencv-python>=4.11.0.86",
+    "pygame>=2.6.1",
+    "transforms3d>=0.4.2",
+    "pynput>=1.8.1",
+    "sharedmemory>=1.6.0",
+    "open3d>=0.19.0",
+    "sapien>=3.0.1",
+    "pyrealsense2>=2.56.5.9235",
+    "atomics>=1.0.3",
+    "xarm-python-sdk>=1.17.0",
+    "dynamixel-sdk",
+    "zmq>=0.0.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["robot_control*", "third_party*"]
+
+[tool.uv.sources]
+dynamixel-sdk = { path = "src/third_party/DynamixelSDK/python" }
+
