@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from matplotlib.pyplot import gray
+
 from third_party.gello.robots import robot
 
 """
@@ -194,6 +196,98 @@ def _write_json(path: Path, payload: dict) -> None:
 def _pair_key(src: str, dst: str) -> str:
     return f"{src}2{dst}"
 
+def _estimate_wrist2other_via_charuco(
+    images_dir: Path,
+    other: str,
+    wrist_mtx: np.ndarray,
+    other_mtx: np.ndarray,
+    show_gui: bool = False,
+):
+    """
+    Look for paired files: wrist@pair_k.png and {other}@pair_k.png (same k).
+    Build lists T_As (wristCam->board) and T_Bs (otherCam->board), then solve:
+       minimize_x sum || log( inv(T_A) @ (T_wrist2other(x) @ T_B) ) ||
+    Returns 4x4 T_wrist2other or None if no valid pairs.
+    """
+    A_list, B_list = [], []
+
+    # discover common ks by filename
+    wrist_imgs, wimg_names = _get_images(images_dir / "wrist_image@pose_*.png")
+    side_imgs, simg_names = _get_images(images_dir / f"{other}_image@pose_*.png")
+
+    if len(wrist_imgs) != len(side_imgs):
+        print("check the files")
+        return
+    
+    all_wrsit_T_check = []
+    all_side_T_check = []
+
+    for wrist_img, side_img, wimg_name, simg_name in zip(wrist_imgs, side_imgs, wimg_names, simg_names):
+        print(f"checking {wimg_name} {simg_name}")
+
+        # ---- Wrist Cam Charuco ----
+        gray_w = cv2.cvtColor(wrist_img, cv2.COLOR_BGR2GRAY)
+        cc_w, ids_w, mc_w, mid_w = DETECTOR.detectBoard(gray_w)
+        if cc_w is None or len(cc_w) < 4:
+            if show_gui:
+                cv2.imshow("Charuco Wrist (s=skip)", wrist_img)
+                cv2.waitKey(0)
+            print(f"  → not enough Charuco corners in {wimg_name}, skipping")
+            continue
+        ok_w, rvec_w, tvec_w = cv2.aruco.estimatePoseCharucoBoard(
+            cc_w, ids_w, CALIB_BOARD, wrist_mtx, np.zeros(5), rvec=None, tvec=None
+        )
+        # build transform Cam_wrist → Board
+        R_w, _ = cv2.Rodrigues(rvec_w)
+        t_w = tvec_w.flatten()
+        wrist_T_chk = calib.compose_transform(R_w, t_w)
+
+        # ---- Side Cam Charuco ----
+        gray_s = cv2.cvtColor(side_img, cv2.COLOR_BGR2GRAY)
+        cc_s, ids_s, mc_s, mid_s = DETECTOR.detectBoard(gray_s)
+        if cc_s is None or len(cc_s) < 4:
+            print(f"  → not enough Charuco corners in {simg_name}, skipping")
+            continue
+        ok_s, rvec_s, tvec_s = cv2.aruco.estimatePoseCharucoBoard(
+            cc_s, ids_s, CALIB_BOARD, other_mtx, np.zeros(5), rvec=None, tvec=None
+        )
+        R_s, _ = cv2.Rodrigues(rvec_s)
+        t_s = tvec_s.flatten()
+        side_T_chk = calib.compose_transform(R_s, t_s)
+
+        all_wrsit_T_check.append(wrist_T_chk)
+        all_side_T_check.append(side_T_chk)
+
+        if show_gui:
+            vis_w = cv2.aruco.drawDetectedMarkers(gray_w.copy(), mc_w, mid_w)
+            cv2.drawFrameAxes(vis_w, wrist_mtx, np.zeros(5), rvec_w, tvec_w, CHECKER_SIZE_M * 2)
+            vis_s = cv2.aruco.drawDetectedMarkers(gray_s.copy(), mc_s, mid_s)
+            cv2.drawFrameAxes(vis_s, other_mtx, np.zeros(5), rvec_s, tvec_s, CHECKER_SIZE_M * 2)
+            combo = np.hstack((vis_w, vis_s))
+            cv2.imshow("Charuco Wrist | Side (s=skip)", combo)
+            key = cv2.waitKey(0)
+
+        all_wrsit_T_check.append(wrist_T_chk)
+        all_side_T_check.append(side_T_chk)
+
+    if not all_wrsit_T_check:
+        print("No valid Charuco detections found – aborting.")
+        return
+
+    T_As = all_wrsit_T_check
+    T_Bs = all_side_T_check
+
+    # Initial guess from the first data
+    x0 = se3_log(all_wrsit_T_check[0] @ np.linalg.inv(all_side_T_check[0]))
+
+    result = minimize(lambda x: np.sum(handeye_residual(x, T_As, T_Bs)), x0)
+    t_opt = result.x[:3]
+    rotvec_opt = result.x[3:]
+    wristcam2other = pose_to_matrix(t_opt, rotvec_opt)
+
+    return wristcam2other
+
+
 # ------------------
 # Main class
 # ------------------
@@ -211,8 +305,14 @@ class HandEyeCalibrator:
     def __post_init__(self):
         self.work_dir = Path(self.work_dir).expanduser()
         self.work_dir.mkdir(parents=True, exist_ok=True)
-        self.images_dir = self.work_dir / "calibration_images"
-        self.images_dir.mkdir(parents=True, exist_ok=True)
+        calibration_images_dir = self.work_dir / "calibration_images"
+        calibration_images_dir.mkdir(parents=True, exist_ok=True)
+        self.handeye_images_dir = self.work_dir / "calibration_images" / "handeye"
+        self.handeye_images_dir.mkdir(parents=True, exist_ok=True)
+        self.compose_images_dir = self.work_dir / "calibration_images" / "compose"
+        self.compose_images_dir.mkdir(parents=True, exist_ok=True)
+        self.marked_images_dir = self.work_dir / "calibration_images" / "marked"
+        self.marked_images_dir.mkdir(parents=True, exist_ok=True)
         self.extr_path = self.work_dir / "extrinsics.json"
         self.intr_path = self.work_dir / "intrinsics.json"
 
@@ -239,6 +339,7 @@ class HandEyeCalibrator:
             try:
                 cam.poll_frames()
                 bgr = cam.get_color_image()
+                cv2.imwrite(str(self.compose_images_dir / f"{cam_name}_image@pose_0.png"), bgr)
 
                 # intrinsics from device → OpenCV
                 intr_rs = cam.get_color_intrinsic()  # dict
@@ -266,7 +367,7 @@ class HandEyeCalibrator:
 
                 vis = cv2.aruco.drawDetectedMarkers(bgr.copy(), mc, mid)
                 cv2.drawFrameAxes(vis, mtx, np.zeros(5), rvec, tvec, CHECKER_SIZE_M * 2)
-                cv2.imwrite(str(self.images_dir / f"{cam_name}_fixed_calibration.png"), vis)
+                cv2.imwrite(str(self.marked_images_dir / f"{cam_name}_fixed_calibration.png"), vis)
 
                 if self.show_gui:
                     cv2.imshow(f"{cam_name} Charuco", vis)
@@ -302,13 +403,16 @@ class HandEyeCalibrator:
         for idx, joint_deg in enumerate(PREDEFINED_JOINTS_DEG):
             print(f"Capturing {idx} / {len(PREDEFINED_JOINTS_DEG) - 1}")
 
+
             self.robot.move_and_wait_robot(_deg_to_rad(np.asarray(joint_deg)))
             wrist_cam.poll_frames()
             img = copy.deepcopy(wrist_cam.get_color_image())
 
             # save image
             print("Saving image")
-            cv2.imwrite(str(self.images_dir / f"wrist_image@pose_{idx}.png"), img)
+            cv2.imwrite(str(self.handeye_images_dir / f"wrist_image@pose_{idx}.png"), img)
+            if idx == 0:
+                cv2.imwrite(str(self.compose_images_dir / f"wrist_image@pose_{idx}.png"), img)
 
             # save eef pose
             print("Saving End Effector Pose")
@@ -316,7 +420,7 @@ class HandEyeCalibrator:
             ee_translation = robot_state.cartesian_pos().tolist()
             ee_quat = robot_state.quat().tolist()
             ee_data = {"translation": ee_translation, "quat": ee_quat}
-            _write_json(self.images_dir / f"wrist_ee_pose_{idx}.json", ee_data)
+            _write_json(self.handeye_images_dir / f"wrist_ee_pose_{idx}.json", ee_data)
 
             if self.show_gui:
                 cv2.namedWindow(f"Wrist image {idx}", cv2.WINDOW_AUTOSIZE)
@@ -332,8 +436,8 @@ class HandEyeCalibrator:
         extr = _read_json(self.extr_path)
         intr = _read_json(self.intr_path)
 
-        wrist_images, img_names = _get_images(self.images_dir / "wrist_image@pose_*.png")
-        Rees, tees, ee_names = _get_ee_poses(self.images_dir / "wrist_ee_pose_*.json")
+        wrist_images, img_names = _get_images(self.handeye_images_dir / "wrist_image@pose_*.png")
+        Rees, tees, ee_names = _get_ee_poses(self.handeye_images_dir / "wrist_ee_pose_*.json")
 
         wrist_intr_dict = intr.get("wrist", {})
         wrist_mtx = np.array([[wrist_intr_dict["fx"], 0, wrist_intr_dict["ppx"]], [0, wrist_intr_dict["fy"], wrist_intr_dict["ppy"]], [0, 0, 1]])
@@ -356,7 +460,7 @@ class HandEyeCalibrator:
 
             vis = gray.copy()[:, :, np.newaxis].repeat(3, axis=2)
             cv2.drawFrameAxes(vis, wrist_mtx, wrist_dist, rvec, tvec, 0.1)
-            cv2.imwrite(str(self.images_dir / f"handeye_calibration_{idx}.png"), vis)
+            cv2.imwrite(str(self.handeye_images_dir / f"handeye_calibration_{idx}.png"), vis)
             if self.show_gui:
                 cv2.imshow(f"Hand-Eye Calibration {idx}", vis)
                 cv2.waitKey(100)
@@ -379,62 +483,79 @@ class HandEyeCalibrator:
     # ---------------------------------------------------------
     def compose(self) -> None:
         extr = _read_json(self.extr_path)
+        intr = _read_json(self.intr_path)
         board2cam: dict = extr.get("board2cam", {})
         if not board2cam:
             raise RuntimeError("compose(): board2cam not found; run fixed_calibration() first.")
         if "wristcam2ee" not in extr or "ee2base" not in extr:
             raise RuntimeError("compose(): wristcam2ee or ee2base missing; run handeye_calibration() first.")
+        if "wrist" not in board2cam:
+            raise RuntimeError("compose(): no camera named 'wrist' found in board2cam; cannot identify wrist camera.")
 
-        # Identify wrist camera key heuristically: prefer key named 'wrist'
+        wrist_key = "wrist"
         cam_names = list(board2cam.keys())
-        if "wrist" in cam_names:
-            wrist_key = "wrist"
-        else:
-            # fallback: first key
-            wrist_key = cam_names[0]
 
-        T_wristcam2ee = np.asarray(extr["wristcam2ee"])  # 4×4
-        T_ee2base = np.asarray(extr["ee2base"])          # 4×4
+        # intrinsics needed for Charuco on both cams
+        if wrist_key not in intr:
+            raise RuntimeError("compose(): missing wrist intrinsics in intrinsics.json")
+        wrist_intr_dict = intr.get("wrist", {})
+        wrist_mtx = np.array([[wrist_intr_dict["fx"], 0, wrist_intr_dict["ppx"]], [0, wrist_intr_dict["fy"], wrist_intr_dict["ppy"]], [0, 0, 1]])
+        wrist_dist = np.array(wrist_intr_dict["coeffs"])
 
-        T_board2wrist = np.asarray(board2cam[wrist_key])
-        T_wrist2board = np.linalg.inv(T_board2wrist)
-
-        # Prepare new containers
+        # containers with new naming
         extr.setdefault("cam2cam", {})
         extr.setdefault("cam2base", {})
 
-        # Determine wrist key as you already do
-        cam_names = list(board2cam.keys())
-        wrist_key = "wrist" if "wrist" in cam_names else cam_names[0]
-
-        # Pull transforms
         T_wristcam2ee = np.asarray(extr["wristcam2ee"])
         T_ee2base     = np.asarray(extr["ee2base"])
+
+            # always write wrist->base
+        T_wrist2base = T_ee2base @ T_wristcam2ee
+        extr["cam2base"][_pair_key(wrist_key, "base")] = T_wrist2base.tolist()
+
+        # for each other camera, try optimization first, else fallback to board composition
         T_board2wrist = np.asarray(board2cam[wrist_key])
         T_wrist2board = np.linalg.inv(T_board2wrist)
 
-        # Always write wrist->base
-        T_wrist2base = T_ee2base @ T_wristcam2ee  # (wristcam->ee->base)
-        extr["cam2base"][_pair_key(wrist_key, "base")] = T_wrist2base.tolist()
-
-        # For each other camera, compute wrist->other and other->base
         for other in cam_names:
             if other == wrist_key:
                 continue
 
-            T_board2other = np.asarray(board2cam[other])
+            # need their intrinsics for optimization path
+            if other not in intr:
+                # if no intrinsics, we cannot run Charuco; skip to fallback
+                other_mtx = None
+            else:
+                other_intr_dict = intr.get(other, {})
+                other_mtx = np.array([[other_intr_dict["fx"], 0, other_intr_dict["ppx"]], [0, other_intr_dict["fy"], other_intr_dict["ppy"]], [0, 0, 1]])
+                other_dist = np.array(other_intr_dict["coeffs"])
 
-            # wrist->other via board frame
-            T_wrist2other = T_wrist2board @ T_board2other
+            T_wrist2other = None
+
+            # --- Optimization path (requires paired images + intrinsics) ---
+            if other_mtx is not None:
+                T_wrist2other = _estimate_wrist2other_via_charuco(
+                    images_dir=self.compose_images_dir,
+                    other=other,
+                    wrist_mtx=wrist_mtx,
+                    other_mtx=other_mtx,
+                    show_gui=self.show_gui,
+                )
+
+            # --- Fallback path (board composition) ---
+            if T_wrist2other is None:
+                T_board2other = np.asarray(board2cam[other])
+                T_wrist2other = T_wrist2board @ T_board2other  # algebraic fallback
+
+            # write cam2cam
             extr["cam2cam"][_pair_key(wrist_key, other)] = T_wrist2other.tolist()
 
-            # other->base = ee->base * wristcam->ee * wrist->other
+            # write other->base = ee->base @ wristcam->ee @ wrist->other
             T_other2base = T_ee2base @ T_wristcam2ee @ T_wrist2other
             extr["cam2base"][_pair_key(other, "base")] = T_other2base.tolist()
 
-        # Persist
         _write_json(self.extr_path, extr)
-        print("finish computing: wristcam2cam and cam2base for all other cameras.")
+        print("wrote cam2cam and cam2base")
 
     # ------------------
     # Cleanup
@@ -463,7 +584,6 @@ if __name__ == "__main__":
     # Example usage (adjust IP/serials accordingly)
     work_dir = Path(args.work_dir).expanduser()
     serials = {"wrist": "130322270735", "side": "239222303153"}
-    # serials = {"side": "239222303153"}
 
     if args.mode == "fixed":
         cal = HandEyeCalibrator(
@@ -479,7 +599,7 @@ if __name__ == "__main__":
             robot_ip=args.robot_ip, 
             show_gui=args.show_gui
         )
-        # cal.capture_wrist_images(serials["wrist"])
+        cal.capture_wrist_images(serials["wrist"])
         cal.handeye_calibration()
     elif args.mode == "compose":
         cal = HandEyeCalibrator(
