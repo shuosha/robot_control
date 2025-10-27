@@ -32,6 +32,7 @@ from robot_control.utils.kinematics_utils import KinHelper, trans_mat_to_pos_qua
 
 from robot_control.camera.multi_realsense import MultiRealsense
 from robot_control.camera.single_realsense import SingleRealsense
+from robot_control.utils.pi05_wrapper import PI05Wrapper
 
 # TODO: import policy inference wrapper
 
@@ -234,8 +235,11 @@ class RobotEnv(mp.Process):
                 self.action_traj = action_traj
                 self.total_timesteps = action_traj.shape[0]
             elif action_receiver == "policy":
-                assert checkpoint_path is not None, "Checkpoint path must be provided for policy mode"
-                self.policy = PolicyInferenceWrapper(checkpoint_path=checkpoint_path)
+                # pass
+                # assert checkpoint_path is not None, "Checkpoint path must be provided for policy mode"
+                # self.policy = PolicyInferenceWrapper(checkpoint_path=checkpoint_path)
+
+                self.policy = PI05Wrapper(prompt="pick up green cube", cfg_name="pi05_droid", checkpoint_path="gs://openpi-assets/checkpoints/pi05_droid")
 
             # create action agent
             if pusht_mode:
@@ -312,7 +316,7 @@ class RobotEnv(mp.Process):
         # get intrinsics
         # intrs = self.get_intrinsics()
         # intrs = np.array(intrs)
-        # np.save(root / "log" / self.data_dir / self.exp_name / "calibration" / "intrinsics.npy", intrs)
+        # np.save(root / "logs" / self.data_dir / self.exp_name / "calibration" / "intrinsics.npy", intrs)
         
         print("real env started")
 
@@ -384,6 +388,9 @@ class RobotEnv(mp.Process):
                 }
                 self.state["gripper_out"] = {
                     "value": np.array(self.xarm_controller.cur_gripper_q[:])
+                }
+                self.state["force_out"] = {
+                    "value": np.array(self.xarm_controller.cur_force_q[:])
                 }
         elif self.robot_name == "aloha": # TODO: add aloha support
             if self.teleop.is_alive():
@@ -522,7 +529,7 @@ class RobotEnv(mp.Process):
             elif self.action_receiver == "keyboard" or self.action_receiver == "gello":
                 self.xarm_controller.teleop_activated.value = False
 
-    def store_robot_data(self, trans_out, qpos_out, gripper_out, action_qpos_out, action_trans_out, action_gripper_out, robot_obs_record_dir, robot_action_record_dir):
+    def store_robot_data(self, trans_out, qpos_out, gripper_out, action_qpos_out, action_trans_out, action_gripper_out, robot_obs_record_dir, robot_action_record_dir, force_out=None) -> None:
         res_obs = {}
         if self.bimanual:
             # store eef poses
@@ -556,6 +563,10 @@ class RobotEnv(mp.Process):
             if self.gripper_enable:
                 gripper = gripper_out["value"][0]
                 res_obs['obs.gripper_qpos'] = gripper_raw_to_qpos(gripper) # NOTE: not np array for xarm
+
+            if force_out is not None:
+                force = force_out["value"]
+                res_obs['obs.force'] = force.tolist()
 
         with open(robot_obs_record_dir / f"{trans_out['capture_time']:.3f}.json", 'w') as f:
             json.dump(res_obs, f, indent=4)
@@ -598,6 +609,20 @@ class RobotEnv(mp.Process):
 
         with open(robot_action_record_dir / f"{action_qpos_out['capture_time']:.3f}.json", 'w') as f:
             json.dump(res_action, f, indent=4)
+
+    def _read_env_obs(self, rgbs, depths, trans_out, qpos_out, gripper_out):
+        if self.bimanual:
+            raise NotImplementedError("Bimanual real env is not implemented yet")
+        elif not self.bimanual and self.robot_name == "xarm7":
+            env_obs = {
+                'rgbs': rgbs, # list of (H, W, 3)
+                'depths': depths, # list of (H, W)
+                'trans_out': trans_out["value"], # (4, 4)
+                'qpos_out': qpos_out["value"], # (7,)
+                'gripper_out': gripper_out["value"] # (1,)
+            }
+
+        return env_obs
 
     def run(self) -> None:
         robot_obs_record_dir = root / "logs" / self.data_dir / self.exp_name / "robot_obs"
@@ -644,6 +669,32 @@ class RobotEnv(mp.Process):
                 trans_out = state.get("trans_out", None)
                 qpos_out = state.get("qpos_out", None)
                 gripper_out = state.get("gripper_out", None)
+                force_out = state.get("force_out", None)
+
+                if perception_out is not None:
+                    for k, v in perception_out['value'].items():
+                        rgbs[k] = v["color"]
+                        depths[k] = v["depth"]
+
+                if self.action_receiver == "policy":
+                    env_obs = self._read_env_obs(rgbs, depths, trans_out, qpos_out, gripper_out)
+
+                    # ---------- inspect env_obs ------------
+                    # for k, v in env_obs.items():
+                    #     if isinstance(v, list):
+                    #         for i in range(len(v)):
+                    #             print("shape", f"{k}[{i}]", np.array(v[i]).shape)
+                    #             print("dtype", f"{k}[{i}]", np.array(v[i]).dtype)
+                    #     elif isinstance(v, np.ndarray):
+                    #         print("shape", k, np.array(v).shape)
+                    #         print("dtype", k, np.array(v).dtype) 
+                    #     else:
+                    #         print("type", k, type(v))
+
+                    action = self.policy.get_action(env_obs)
+                    print("current qpos:", qpos_out["value"])
+                    print("qpos action:", action)
+                    self.action_agent.command[:] = action
 
                 # action data
                 action_qpos_out = state.get("action_qpos_out", None)
@@ -663,13 +714,9 @@ class RobotEnv(mp.Process):
                         action_trans_out, 
                         action_gripper_out, 
                         robot_obs_record_dir,
-                        robot_action_record_dir
+                        robot_action_record_dir,
+                        force_out,
                     )
-
-                if perception_out is not None:
-                    for k, v in perception_out['value'].items():
-                        rgbs[k] = v["color"]
-                        depths[k] = v["depth"]
 
                 # Build raw full RGB+depth image (original behavior)
                 row_imgs = []
@@ -689,6 +736,8 @@ class RobotEnv(mp.Process):
                 )
 
                 time.sleep(max(0, 1 / fps - (time.time() - tic)))
+                if 1 / (time.time() - tic) > fps + 1 or 1 / (time.time() - tic) < fps - 1:
+                    print("real env fps: ", 1 / (time.time() - tic), f"(target: {fps})")
             
             except BaseException as e:
                 print(f"Error in real robot env: {e.with_traceback()}")

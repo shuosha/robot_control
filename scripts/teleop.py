@@ -57,8 +57,8 @@ if __name__ == '__main__':
 
         # control
         control_mode="position_control",
-        admittance_control=False,
-        ema_factor=0.7,
+        admittance_control=True,
+        ema_factor=0.5,
         pusht_mode=args.pusht,
         action_receiver=args.input_mode,
         init_pose=args.init_pose,

@@ -242,7 +242,8 @@ class ActionAgent(mp.Process):
                     self.command_sender_left.send([self.command[0][0:8]])
                     self.command_sender_right.send([self.command[0][8:16]])
                 else:
-                    self.command_sender.send([command])
+                    self.command_sender.send([command]) # send command
+                    # self.command_sender.send([[]]) # zero action for safety
 
                 # data storage
                 self.cur_time_q.value = current_time

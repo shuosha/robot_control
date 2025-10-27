@@ -128,6 +128,7 @@ class XarmController(mp.Process):
         self.cur_trans_q = mp.Array('d', [0.0] * 16)
         self.cur_qpos_q = mp.Array('d', [0.0] * 7)
         self.cur_gripper_q = mp.Array('d', [0.0] * 1)
+        self.cur_force_q = mp.Array('d', [0.0] * 6)
         self.cur_time_q = mp.Value('d', 0.0)
 
         self.command_receiver = None
@@ -170,6 +171,12 @@ class XarmController(mp.Process):
                 # always update the latest position
                 self.cur_trans_q[:] = fk_trans_mat.flatten()
                 self.cur_qpos_q[:] = cur_qpos
+
+                code, ft_data = self._arm.get_ft_sensor_data()
+                if code == 0:
+                    self.cur_force_q[:] = np.array(ft_data)
+                else:
+                    raise ValueError("get_ft_sensor_data Error", code, ft_data)
 
                 # self.cur_xyzrpy = cur_xyzrpy
                 self.cur_qpos = cur_qpos
@@ -309,18 +316,17 @@ class XarmController(mp.Process):
         if self.admittance_control:
             assert self.control_mode != "velocity_control", "admittance control is not compatible with velocity control mode"
             # set tool admittance parameters:
-            K_pos = 500         #  x/y/z linear stiffness coefficient, range: 0 ~ 2000 (N/m)
+            K_pos = 500       #  x/y/z linear stiffness coefficient, range: 0 ~ 2000 (N/m)
             K_ori = 4           #  Rx/Ry/Rz rotational stiffness coefficient, range: 0 ~ 20 (Nm/rad)
 
             # Attention: for M and J, smaller value means less effort to drive the arm, but may also be less stable, please be careful. 
             M = float(0.02)  #  x/y/z equivalent mass; range: 0.02 ~ 1 kg
             J = M * 0.01     #  Rx/Ry/Rz equivalent moment of inertia, range: 1e-4 ~ 0.01 (Kg*m^2)
 
-            c_axis = [1,1,1,0,0,0] # set z axis as compliant axis
+            c_axis = [0,0,1,0,0,0] # set z axis as compliant axis
             ref_frame = 0         # 0 : base , 1 : tool
 
-            self._arm.set_ft_sensor_admittance_parameters([M, M, M, J, J, J], [K_pos, K_pos, K_pos, K_ori, K_ori, K_ori], [0]*6) # B(damping) is reserved, give zeros
-            self._arm.set_ft_sensor_admittance_parameters(ref_frame, c_axis)
+            self._arm.set_ft_sensor_admittance_parameters(coord=ref_frame, c_axis=c_axis, M=[M, M, M, J, J, J], K=[K_pos, K_pos, K_pos, K_ori, K_ori, K_ori], B=[0]*6) # B(damping) is reserved, give zeros
 
             # enable ft sensor communication
             self._arm.set_ft_sensor_enable(1)
@@ -332,6 +338,11 @@ class XarmController(mp.Process):
             self._arm.set_ft_sensor_mode(1)
             # will start after set_state(0)
             self._arm.set_state(0)
+
+            print("ft sensor cfg: ", self._arm.get_ft_sensor_config())
+            # print("ft collision reb distance: ", self._arm.get_ft_collision_reb_distance()) #TODO: DEBUG
+            print("ft collision rebound: ", self._arm.get_ft_collision_rebound())
+            # print("ft collision threshold: ", self._arm.get_ft_collision_threshold())
         
         self.state.value = ControllerState.RUNNING.value
 
@@ -664,7 +675,7 @@ class XarmController(mp.Process):
                                 next_state = current_state
                             else:
                                 if joint_delta_norm > max_delta_norm:
-                                    delta[0:7] = delta[0:7] / joint_delta_norm * max_delta_norm
+                                    delta[0:7] = delta[0:7] / joint_delta_norm * max_delta_norm # upper bounds delta at: max_delta_norm
                                 next_state = current_state + delta
 
                             # print('next_state:', next_state)

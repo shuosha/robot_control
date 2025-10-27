@@ -13,7 +13,7 @@ dependencies = [
     "torch==2.7.1",
     "multiprocess",
     "scipy>=1.16.2",
-    "opencv-python==4.5.5.64",
+    "opencv-python>=4.5.5.64",
     "pygame>=2.6.1",
     "transforms3d>=0.4.2",
     "pynput>=1.8.1",
@@ -24,9 +24,14 @@ dependencies = [
     "atomics>=1.0.3",
     "xarm-python-sdk>=1.17.0",
     "dynamixel-sdk",
+    "openpi",
     "zmq>=0.0.0",
     "pip>=25.2",
     "opencv-contrib-python>=4.11.0.86",
+    "pytest>=8.4.2",
+    "kornia>=0.8.1",
+    "imageio>=2.37.0",
+    "imageio-ffmpeg>=0.6.0",
 ]
 
 [tool.setuptools.packages.find]
@@ -35,4 +40,4 @@ include = ["robot_control*", "third_party*"]
 
 [tool.uv.sources]
 dynamixel-sdk = { path = "src/third_party/DynamixelSDK/python" }
-
+openpi = { path = "../openpi", editable = true }

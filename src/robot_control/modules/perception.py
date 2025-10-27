@@ -109,7 +109,7 @@ class Perception(mp.Process):
                         record_start_time = get_time
                         record_start_frame = cameras_output[0]['step_idx'].item()
                         
-                        record_dir = root / "log" / self.data_dir / self.exp_name / f"{record_start_time:.0f}"
+                        record_dir = root / "logs" / self.data_dir / self.exp_name / f"{record_start_time:.0f}"
                         os.makedirs(record_dir, exist_ok=True)
                         timestamps_f = open(f'{record_dir}/timestamps.txt', 'a')
                         
