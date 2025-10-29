@@ -7,7 +7,7 @@ from pynput import keyboard
 
 from robot_control.utils.udp_util import udpReceiver, udpSender
 from robot_control.modules.common.communication import XARM_STATE_PORT, XARM_CONTROL_PORT_L
-from robot_control.modules.common.xarm import GRIPPER_OPEN_MIN, GRIPPER_OPEN_MAX, POSITION_UPDATE_INTERVAL, COMMAND_CHECK_INTERVAL
+from robot_control.modules.common.xarm import GRIPPER_OPEN_MIN, GRIPPER_OPEN_MAX, POSITION_UPDATE_FREQ
 
 np.set_printoptions(precision=2, suppress=True)
 
@@ -135,7 +135,7 @@ class KeyboardTeleop(mp.Process):
                 # self.fk_trans_mat = xarm_state["e2b"]
                 if self.gripper_enable:
                     self.cur_gripper_pos = xarm_state["gripper"]
-            time.sleep(POSITION_UPDATE_INTERVAL / 10)
+            time.sleep(1 / POSITION_UPDATE_FREQ / 10)
 
         self.state_receiver.stop()
         self.log(f"update_xarm_pos exit!")
@@ -244,8 +244,8 @@ class KeyboardTeleop(mp.Process):
         self.keyboard_listener = keyboard.Listener(on_press=self.on_press, on_release=self.on_release)
         self.keyboard_listener.start()
         
-        self.update_pos_t = threading.Thread(name="get_pos_from_XarmController", target=self.update_xarm_pos)
-        self.update_pos_t.start()
+        # self.update_pos_t = threading.Thread(name="get_pos_from_XarmController", target=self.update_xarm_pos)
+        # self.update_pos_t.start()
 
         self.command_sender = udpSender(port=XARM_CONTROL_PORT_L)
 
@@ -255,7 +255,6 @@ class KeyboardTeleop(mp.Process):
             try:
                 self.get_command()
                 self.command_sender.send(self.command)
-                time.sleep(COMMAND_CHECK_INTERVAL / 2)
             except:
                 self.log(f"keyboard teleop error")
                 break

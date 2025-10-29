@@ -81,6 +81,7 @@ class RobotEnv(mp.Process):
 
         # --------------------- Control ---------------------
         action_receiver: Literal["gello", "keyboard", "policy", "replay"] = "gello",
+        action_agent_fps: float = 10.0,
         pusht_mode: bool = False,
         init_pose: Sequence[float] | None = [],
         action_traj: np.ndarray | None = None,
@@ -192,6 +193,7 @@ class RobotEnv(mp.Process):
                     control_mode=control_mode,
                     admittance_control=admittance_control,
                     ema_factor=ema_factor,
+                    comm_update_fps=action_agent_fps,
                     robot_id=0,
                     verbose=self.debug >= EnvEnum.VERBOSE.value,
                 )
@@ -202,6 +204,7 @@ class RobotEnv(mp.Process):
                     control_mode=control_mode,
                     admittance_control=admittance_control,
                     ema_factor=ema_factor,
+                    comm_update_fps=action_agent_fps,
                     robot_id=1,
                     verbose=self.debug >= EnvEnum.VERBOSE.value,
                 )
@@ -215,6 +218,7 @@ class RobotEnv(mp.Process):
                     control_mode=control_mode,
                     admittance_control=admittance_control,
                     ema_factor=ema_factor,
+                    comm_update_fps=action_agent_fps,
                     robot_id=-1,
                     verbose=self.debug >= EnvEnum.VERBOSE.value,
                 )
@@ -705,7 +709,7 @@ class RobotEnv(mp.Process):
 
                 # TODO: compare with prev. code and debug why store data not working, mostly likely changes storing location to get_command() in action_agent?
                 # store state and action data
-                if perception_out is not None:
+                if trans_out is not None:
                     self.store_robot_data(
                         trans_out,
                         qpos_out,

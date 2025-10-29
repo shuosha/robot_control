@@ -13,7 +13,7 @@ from robot_control.utils.udp_util import udpReceiver, udpSender
 from robot_control.utils.kinematics_utils import KinHelper
 
 from robot_control.modules.common.communication import XARM_STATE_PORT, XARM_CONTROL_PORT, XARM_CONTROL_PORT_L, XARM_CONTROL_PORT_R
-from robot_control.modules.common.xarm import GRIPPER_OPEN_MIN, GRIPPER_OPEN_MAX, POSITION_UPDATE_INTERVAL, COMMAND_CHECK_INTERVAL
+from robot_control.modules.common.xarm import GRIPPER_OPEN_MIN, GRIPPER_OPEN_MAX
 from robot_control.camera.shared_memory.shared_memory_ring_buffer import SharedMemoryRingBuffer
 
 from third_party.gello.agents.agent import BimanualAgent, DummyAgent
@@ -264,13 +264,13 @@ class GelloListener(mp.Process):
     def run(self):
         self.init_gello()
 
-        # start_time = time.time()
+        
         while self.alive:
             try:
-                # print('GelloListener alive')
+                curr_time = time.time()
                 action = self.agent.get_action()
                 self.command[:] = action
-                # self.ring_buffer.put({'command': action, 'timestamp': time.time()})
+                # print("gello update freq: %.2f Hz"%(1.0 / (time.time() - curr_time)))
             except:
                 print(f"Error in GelloListener")
                 break
@@ -492,7 +492,6 @@ class GelloTeleop(mp.Process): # TODO: make this purely for teleop
                     self.command_sender_right.send([self.command[0][8:16]])
                 else:
                     self.command_sender.send([command])
-                # time.sleep(max(0, COMMAND_CHECK_INTERVAL / 2 - (time.time() - command_start_time)))
             except Exception as e:
                 print(f"Error in GelloTeleop", e.with_traceback())
                 break

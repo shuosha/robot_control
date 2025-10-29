@@ -1,0 +1,23 @@
+# Xarm Manual Notes
+
+set_servo_angle() (Mode 0: Position control / PTP planner)
+
+    You give a single joint target (plus optional speed/accel that DO work here).
+
+    The controller plans a point-to-point trajectory to that target (trapezoidal/SCurve inside the box).
+
+    If you call it again before finishing, it just plans a new PTP from the current state.
+    Between successive calls the velocity is discontinuous (the manual’s “speed between each instruction is discontinuous”).
+
+    It’s not meant for high-rate streaming; think “go to this waypoint”, not servo.
+
+set_servo_angle_j() (Mode 1: servoj)
+
+    You first switch into servoj mode.
+
+    This command has no buffer: the arm executes only the latest target it received.
+
+    The SDK exposes speed/accel/time parameters, but they are ignored in servoj (per the text).
+
+    The control box expects a stream of nearby setpoints at up to ~250 Hz max (≥100–200 Hz recommended).
+    If you send faster than 250 Hz, extra commands are dropped; if you send too slowly or with big jumps, motion will look jerky.

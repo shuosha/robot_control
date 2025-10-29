@@ -13,7 +13,7 @@ from robot_control.utils.udp_util import udpReceiver, udpSender
 from robot_control.utils.kinematics_utils import KinHelper
 
 from robot_control.modules.common.communication import XARM_STATE_PORT, XARM_CONTROL_PORT, XARM_CONTROL_PORT_L, XARM_CONTROL_PORT_R
-from robot_control.modules.common.xarm import GRIPPER_OPEN_MIN, GRIPPER_OPEN_MAX, POSITION_UPDATE_INTERVAL, COMMAND_CHECK_INTERVAL
+from robot_control.modules.common.xarm import GRIPPER_OPEN_MIN, GRIPPER_OPEN_MAX
 from robot_control.camera.shared_memory.shared_memory_ring_buffer import SharedMemoryRingBuffer
 from robot_control.agents.gello_listener import GelloListener
 
@@ -252,7 +252,8 @@ class ActionAgent(mp.Process):
                 fk = self.kin_helper.compute_fk_sapien_links(command_np[:7], [self.kin_helper.sapien_eef_idx])[0]
                 self.cur_eef_trans[:] = fk.flatten()
 
-                # time.sleep(max(0, COMMAND_CHECK_INTERVAL / 2 - (time.time() - command_start_time)))
+                # print("command send freq: %.2f Hz"%(1.0 / (time.time() - current_time)))
+
             except Exception as e:
                 print(f"Error in GelloTeleop", e.with_traceback())
                 break

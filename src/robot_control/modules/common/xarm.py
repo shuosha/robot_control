@@ -11,5 +11,12 @@ ANGLE_VELOCITY_MAX = 0.05  # degree
 GRIPPER_OPEN_MAX = 800
 GRIPPER_OPEN_MIN = 0
 
-POSITION_UPDATE_INTERVAL = 0.02  # 100hz the reader must read faster than this
-COMMAND_CHECK_INTERVAL = 0.02  # 100hz command must be sent faster than this
+POSITION_UPDATE_FREQ = 100.0  # command reader must read faster than this??
+COMMAND_EXECUTION_FREQ = 100.0 # command sender must be faster than this
+
+# velocity control
+VELOCITY_DELTA_SCALE = 7.5
+
+# position control
+MAX_ACTIVATE_DELTA = 0.35
+MAX_DELTA_NORM = 0.1

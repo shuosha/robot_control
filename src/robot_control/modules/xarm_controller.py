@@ -17,6 +17,9 @@ from robot_control.modules.common.xarm import *
 
 np.set_printoptions(precision=2, suppress=True)
 
+@staticmethod
+def interpolate(a, b, alpha):  # linear in joint space
+    return a + alpha * (b - a)
 
 class Rate:
     def __init__(self, *, duration):
@@ -59,8 +62,12 @@ class XarmController(mp.Process):
     GRIPPER_OPEN_MAX = GRIPPER_OPEN_MAX
     GRIPPER_OPEN_MIN = GRIPPER_OPEN_MIN
 
-    POSITION_UPDATE_INTERVAL = POSITION_UPDATE_INTERVAL 
-    COMMAND_CHECK_INTERVAL = COMMAND_CHECK_INTERVAL 
+    POSITION_UPDATE_FREQ = POSITION_UPDATE_FREQ 
+    COMMAND_EXECUTION_FREQ = COMMAND_EXECUTION_FREQ 
+    
+    VELOCITY_DELTA_SCALE = VELOCITY_DELTA_SCALE
+    MAX_ACTIVATE_DELTA = MAX_ACTIVATE_DELTA
+    MAX_DELTA_NORM = MAX_DELTA_NORM
 
 
     def log(self, msg):
@@ -94,20 +101,20 @@ class XarmController(mp.Process):
         admittance_control=False,
         ema_factor=1.0,
         gripper_enable=False,
-        speed=50,  # mm/s
+        comm_update_fps=30.0,
         verbose=False,
     ):
         
         self.robot_id = robot_id
         self.init_pose = init_pose
         self.init_servo_angle = init_servo_angle
-        self.speed = speed
         self.control_mode = control_mode
         assert control_mode in ["position_control", "velocity_control", "cartesian_position_planning"], "control_mode must be position_control, velocity_control or cartesian_position_planning"
         self.admittance_control = admittance_control
         if admittance_control:
             assert control_mode != "velocity_control", "admittance control is not compatible with velocity control mode"
         self.ema_factor = ema_factor
+        self.comm_update_fps = comm_update_fps
 
         assert robot_name and teleop_robot_model_name in ["xarm7", "uf850"], "robot_name and teleop_robot_model_name must be xarm7 or uf850"
         self.mismatch_kinematics = (robot_name != teleop_robot_model_name)
@@ -144,11 +151,15 @@ class XarmController(mp.Process):
         """ update the current position of the arm in a separate thread,
         due to the unprecise of get_position API, use sapien fk to do the position closed loop"""
 
+        update_rate = Rate(
+            duration=1/self.POSITION_UPDATE_FREQ,
+        )
+
         if self.robot_id == -1:
             self.state_sender = udpSender(port=XARM_STATE_PORT)
         try:
             while self.state.value in [ControllerState.INIT.value, ControllerState.RUNNING.value]:
-                # update_start_time = time.time()
+                update_start_time = time.time()
 
                 if self.gripper_enable:
                     cur_gripper_pos = self.get_gripper_state()
@@ -178,10 +189,7 @@ class XarmController(mp.Process):
                 else:
                     raise ValueError("get_ft_sensor_data Error", code, ft_data)
 
-                # self.cur_xyzrpy = cur_xyzrpy
                 self.cur_qpos = cur_qpos
-                # print(f"Get xarm_control data in {time.time() - update_start_time:.6f} seconds")
-                # time.sleep(max(0, self.POSITION_UPDATE_INTERVAL - (time.time() - update_start_time)))
 
                 if self.robot_id == -1:
                     state = {
@@ -192,6 +200,8 @@ class XarmController(mp.Process):
                     if self.gripper_enable:
                         state["gripper"] = cur_gripper_pos
                     self.state_sender.send(state)
+
+                update_rate.sleep()
 
         except Exception as e:
             self.pprint(f"update_cur_position error")
@@ -295,14 +305,14 @@ class XarmController(mp.Process):
         elif self.control_mode == "velocity_control":
             mode = 4 # streaming velocity control
         elif self.control_mode == "cartesian_position_planning":
-            mode = 0 # cartesian position planning
+            raise NotImplementedError("cartesian control is no longer used")
         else:
             raise ValueError("Invalid control mode")
         self._arm.set_mode(mode)  # NOTE: 0: position control mode, 1: servo control mode, 4: velocity control mode
         self._arm.set_state(0)
         if self.gripper_enable:
-            self._arm.set_gripper_enable(True)
             self._arm.set_gripper_mode(0)
+            self._arm.set_gripper_enable(True)
             self._arm.clean_gripper_error()
         # self._arm.set_collision_sensitivity(1)
         time.sleep(1)
@@ -316,14 +326,14 @@ class XarmController(mp.Process):
         if self.admittance_control:
             assert self.control_mode != "velocity_control", "admittance control is not compatible with velocity control mode"
             # set tool admittance parameters:
-            K_pos = 500       #  x/y/z linear stiffness coefficient, range: 0 ~ 2000 (N/m)
+            K_pos = 1000       #  x/y/z linear stiffness coefficient, range: 0 ~ 2000 (N/m)
             K_ori = 4           #  Rx/Ry/Rz rotational stiffness coefficient, range: 0 ~ 20 (Nm/rad)
 
             # Attention: for M and J, smaller value means less effort to drive the arm, but may also be less stable, please be careful. 
-            M = float(0.02)  #  x/y/z equivalent mass; range: 0.02 ~ 1 kg
+            M = float(0.1)  #  x/y/z equivalent mass; range: 0.02 ~ 1 kg
             J = M * 0.01     #  Rx/Ry/Rz equivalent moment of inertia, range: 1e-4 ~ 0.01 (Kg*m^2)
 
-            c_axis = [0,0,1,0,0,0] # set z axis as compliant axis
+            c_axis = [1,1,1,0,0,0] # set z axis as compliant axis
             ref_frame = 0         # 0 : base , 1 : tool
 
             self._arm.set_ft_sensor_admittance_parameters(coord=ref_frame, c_axis=c_axis, M=[M, M, M, J, J, J], K=[K_pos, K_pos, K_pos, K_ori, K_ori, K_ori], B=[0]*6) # B(damping) is reserved, give zeros
@@ -336,57 +346,59 @@ class XarmController(mp.Process):
 
             # move robot in admittance control application
             self._arm.set_ft_sensor_mode(1)
+            self._arm.set_ft_collision_rebound(0)
             # will start after set_state(0)
             self._arm.set_state(0)
 
-            print("ft sensor cfg: ", self._arm.get_ft_sensor_config())
-            # print("ft collision reb distance: ", self._arm.get_ft_collision_reb_distance()) #TODO: DEBUG
-            print("ft collision rebound: ", self._arm.get_ft_collision_rebound())
-            # print("ft collision threshold: ", self._arm.get_ft_collision_threshold())
+            code, config = self._arm.get_ft_sensor_config()
+            if code == 0:
+                print('ft_mode: {}'.format(config[0]))
+                print('ft_is_started: {}'.format(config[1]))
+                print('ft_type: {}'.format(config[2]))
+                print('ft_id: {}'.format(config[3]))
+                print('ft_freq: {}'.format(config[4]))
+                print('ft_mass: {}'.format(config[5]))
+                print('ft_dir_bias: {}'.format(config[6]))
+                print('ft_centroid: {}'.format(config[7]))
+                print('ft_zero: {}'.format(config[8]))
+                print('imp_coord: {}'.format(config[9]))
+                print('imp_c_axis: {}'.format(config[10]))
+                print('M: {}'.format(config[11]))
+                print('K: {}'.format(config[12]))
+                print('B: {}'.format(config[13]))
+                print('f_coord: {}'.format(config[14]))
+                print('f_c_axis: {}'.format(config[15]))
+                print('f_ref: {}'.format(config[16]))
+                print('f_limits: {}'.format(config[17]))
+                print('kp: {}'.format(config[18]))
+                print('ki: {}'.format(config[19]))
+                print('kd: {}'.format(config[20]))
+                print('xe_limit: {}'.format(config[21]))
+
         
         self.state.value = ControllerState.RUNNING.value
 
-    def reset(self):
-        # return self._reset()  # position control
-        # return self._reset_pose()  # NOTE: servo control, use sapien ik to move
-        return
-    
-    def _reset(self, wait=True):
-        self.move_to_pose(self.init_pose, wait=wait)
-        self._arm.set_servo_angle(angle=self.init_servo_angle, isradian=False, wait=wait)
-        if self.gripper_enable:
-            self.open_gripper(wait=wait)
+    def preprocess_command(self, arm_state_goal, curr_arm_state):
+        # check teleop activated
+        delta = arm_state_goal - curr_arm_state # joint space + gripper
+        joint_delta_norm = np.linalg.norm(delta)
+        max_joint_delta = np.abs(delta).max()
 
-    def _reset_pose(self):
-        # init pose
-        if not self.exe_lock.acquire(block=True, timeout=1):
-            self.log("xarm reset failed! exe_lock not acquired!")
-            return
-        
-        self.move(self.init_pose, steps=500, clean=True)
-        self.exe_lock.release()
+        if not self.teleop_activated.value:
+            if max_joint_delta < self.MAX_ACTIVATE_DELTA:
+                self.teleop_activated.value = True
+            next_arm_state = curr_arm_state
+        else:
+            if joint_delta_norm > self.MAX_DELTA_NORM:
+                delta = delta / joint_delta_norm * self.MAX_DELTA_NORM # upper bounds delta at: max_delta_norm
+            next_arm_state = curr_arm_state + delta
 
-    def check_valid_move(self, next_position, steps):
-        # absolute position
-        if len(next_position) == 6:
-            x, y, z, roll, pitch, yaw = next_position
-        elif self.gripper_enable and len(next_position) == 7:
-            x, y, z, roll, pitch, yaw, gripper_pos = next_position
-            if gripper_pos < self.GRIPPER_OPEN_MIN or gripper_pos > self.GRIPPER_OPEN_MAX:
-                self.log(f"invalid move command {next_position}! gripper out of range!")
-                return False
-        
-        if x ** 2 + y ** 2 > self.XY_MAX ** 2 or x ** 2 + y ** 2 < self.XY_MIN ** 2\
-            or x < self.X_MIN or x > self.X_MAX or y < self.Y_MIN or y > self.Y_MAX:
-            self.log(f"invalid move command {next_position}! x,y out of range!")
-            return False
-        elif z > self.Z_MAX or z < self.Z_MIN:
-                self.log(f"invalid move command {next_position}! z out of range!")
-                return False
+        return next_arm_state
 
-        return True
 
-    def velocity_control(self, next_joints, current_joints, ema_factor=1.0, ignore_error=False):
+    # TODO: add reset method that main process can call
+
+    def velocity_control(self, next_state, current_state, ema_factor=1.0, ignore_error=False):
         """
         streaming velocity targets
         """
@@ -394,22 +406,21 @@ class XarmController(mp.Process):
         # next_joints = ema_factor * next_joints + (1 - ema_factor) * current_joints
 
         # NOTE: delta for velocity control
-        next_joints[0:7] = next_joints[0:7] - current_joints[0:7]
+        next_joints = next_state[0:7] - current_state[0:7]
         
         # denormalize gripper position
         if self.gripper_enable:
-            gripper_pos = next_joints[-1]
+            gripper_pos = next_state[-1]
             denormalized_gripper_pos = gripper_pos * (GRIPPER_OPEN_MIN - GRIPPER_OPEN_MAX) + GRIPPER_OPEN_MAX
-            next_joints[-1] = denormalized_gripper_pos
 
         if not self.is_alive:
             raise ValueError("Robot is not alive!")
         if self.gripper_enable and len(next_joints) == 7: #TODO: hardcoded right now
-            if not np.isclose(self.cur_gripper_pos, next_joints[-1]):
-                self.set_gripper_openness(next_joints[-1], wait=False)
-            next_joints = next_joints[:-1]
+            isclose = np.isclose(self.cur_gripper_pos, denormalized_gripper_pos)
+            if not isclose:
+                self.set_gripper_openness(denormalized_gripper_pos, wait=False)
 
-        v = next_joints / self.COMMAND_CHECK_INTERVAL * 0.15
+        v = next_joints * self.VELOCITY_CONTROL_SCALE
         v = v.tolist()
         # print("set velocity:", np.round(v,4), "shape:", np.array(v).shape)
         code = self._arm.vc_set_joint_velocity(v, is_radian=True, is_sync=False, duration=0)
@@ -420,140 +431,33 @@ class XarmController(mp.Process):
             self._arm.clean_error()
             self._arm.clean_warn()
 
-    def position_control(self, next_state, current_state, ema_factor=1.0, ignore_error=False):
+    def position_control(self, next_arm_goal, prev_arm_goal, next_gripper=None, ema_factor=0.5, ignore_error=True):
         """
         streaming position/servo targets
         """
-        # ema
-        next_joints = ema_factor * next_state[:7] + (1 - ema_factor) * current_state[:7]
-        # print("next joints (rad):", np.round(next_joints,4), "shape:", np.array(next_joints).shape)
-        if self.gripper_enable:
-            gripper_pos = next_state[-1]
-        
+        next_arm_goal = ema_factor * next_arm_goal + (1 - ema_factor) * prev_arm_goal
+
         # denormalize gripper position
         if self.gripper_enable:
-            gripper_pos = next_state[-1]
-            denormalized_gripper_pos = gripper_pos * (GRIPPER_OPEN_MIN - GRIPPER_OPEN_MAX) + GRIPPER_OPEN_MAX
-            # print("denormalized_gripper_pos:", denormalized_gripper_pos)
+            assert next_gripper is not None, "next_gripper must be provided when gripper_enable is True"
+            denormalized_gripper_pos = next_gripper * (GRIPPER_OPEN_MIN - GRIPPER_OPEN_MAX) + GRIPPER_OPEN_MAX
 
         if not self.is_alive:
             raise ValueError("Robot is not alive!")
-        if self.gripper_enable and len(next_joints) == 7: #TODO: hardcoded right now
-            if not np.isclose(self.cur_gripper_pos, denormalized_gripper_pos):
-                self.set_gripper_openness(denormalized_gripper_pos, wait=False)
+    
+        if self.gripper_enable and len(next_arm_goal) == 7: #TODO: hardcoded right now            
+            if np.abs(self.cur_gripper_pos - denormalized_gripper_pos) > 50.0:
+                self._arm.set_gripper_position(denormalized_gripper_pos, wait=False, speed=8000)
 
-        next_joints = next_joints.tolist()
-        code = self._arm.set_servo_angle_j(angles=next_joints, is_radian=True, speed=1.0, acc=None, wait=False)
+        next_arm_goal = next_arm_goal.tolist()
+        code = self._arm.set_servo_angle_j(angles=next_arm_goal, is_radian=True, wait=False)
 
         if not self._check_code(code, "set_servo_angle_j"):
             raise ValueError("position control error")
         if ignore_error:
             self._arm.clean_error()
             self._arm.clean_warn()
-
-    # def move_joints(self, next_joints, wait=False, ignore_error=False):
-    #     assert wait == False, "wait is not supported in move_joints"
-    #     if not self.is_alive:
-    #         raise ValueError("Robot is not alive!")
-    #     if self.gripper_enable and len(next_joints) == 7: #TODO: hardcoded right now
-    #         if not np.isclose(self.cur_gripper_pos, next_joints[-1]):
-    #             self.set_gripper_openness(next_joints[-1], wait=wait)
-    #         next_joints = next_joints[:-1]
-        
-    #     # # velocity control (next_joints needs to be delta)
-    #     # v = next_joints / self.COMMAND_CHECK_INTERVAL * 0.15
-    #     # v = v.tolist()
-    #     # print("set velocity:", np.round(v,4), "shape:", np.array(v).shape)
-    #     # code = self._arm.vc_set_joint_velocity(v, is_radian=True, is_sync=False, duration=0)
-        
-    #     # position control
-    #     next_joints = next_joints.tolist()
-    #     code = self._arm.set_servo_angle_j(angles=next_joints, is_radian=True, speed=1.0, acc=None, wait=wait)
-        
-    #     # if not self._check_code(code, "vc_set_joint_velocity"):
-    #     #     raise ValueError("move_joints Error")
-    #     if not self._check_code(code, "set_servo_angle_j"):
-    #         raise ValueError("move_joints Error")
-    #     if ignore_error:
-    #         self._arm.clean_error()
-    #         self._arm.clean_warn()
-
-    def move_to_pose(self, pose, wait=False, ignore_error=False):
-        return self.move(pose)
-
-    def move(self, next_position, steps=10, clean=True):
-        self._move_ik(next_position, steps, clean)  # NOTE: use sapien ik to move
-        # self._move(next_position, steps, clean)
-
-    def _move(self, pose, steps, clean):
-        if not self.is_alive:
-            raise ValueError("Robot is not alive!")
-        code = self._arm.set_position(
-            pose[0], pose[1], pose[2], pose[3], pose[4], pose[5], speed=self.speed, wait=True
-        )
-        if not self._check_code(code, "set_position"):
-            raise ValueError("move_to_pose Error")
-        if clean:
-            self._arm.clean_error()
-            self._arm.clean_warn()
-
-    def _move_ik(self, next_position, steps, clean):
-        """next_position :  x,y,z in mm   and   r,p,y in degree  [and gripper]"""
-        assert next_position is not None, "next_position is not set!"
-        # next_position = np.array(next_position)
-        if not self.check_valid_move(next_position, steps):
-            print(f"invalid move command {next_position}!")
-            return
-        
-        self.log(f'move start: {next_position}')
-
-        if self.gripper_enable and len(next_position) == 7:
-            if not np.isclose(self.cur_gripper_pos, next_position[-1]):
-                self.set_gripper_openness(next_position[-1])
-            next_position = next_position[:-1]
-
-        initial_qpos = np.array(self._arm.get_servo_angle()[1][0:6]) / 180. * np.pi
-        next_position_m_rad = np.zeros_like(np.array(next_position))
-        next_position_m_rad[0:3] = np.array(next_position)[0:3] / 1000.
-        next_position_m_rad[3:] = np.array(next_position)[3:] / 180. * np.pi
-        next_servo_angle = self.kin_helper_uf850.compute_ik_sapien(initial_qpos, next_position_m_rad)
-
-        # fix the eef joint to [-pi,pi]
-        next_servo_angle[-1] = (next_servo_angle[-1] + np.pi) % (2 * np.pi) - np.pi
-
-        # NOTE: In the servo mode: state(1), the actual speed is contorlled by the
-        #       rate of command sending and the the distance between the current and target position 
-        # The steps of each move is decided by the distance of moving to keep speed constant
-        init_position = self.kin_helper_uf850.compute_fk_sapien_links(initial_qpos, [self.kin_helper_uf850.sapien_eef_idx])[0][:3,3] * 1000
-        dis_diff = np.array(next_position[:3]) - np.array(init_position)
-        distance = np.linalg.norm(dis_diff) # in millimeter
-        min_steps = int(distance / self.XYZ_VELOCITY)
-        self.log(f"distance: {distance}, min_steps: {min_steps}")
-        steps = max(min_steps, steps)
-
-        # TODO: add max angular velocity control
-        angle_diff = np.array(next_servo_angle) - np.array(initial_qpos)
-        angle_distance = np.max(abs(angle_diff)) *180 / np.pi
-        self.log(f"angle_distance: {angle_distance}")
-        self.log(f"last steps: {steps}, angle ref steps: {int(angle_distance / self.ANGLE_VELOCITY_MAX)}")
-        steps = max(steps, int(angle_distance / self.ANGLE_VELOCITY_MAX))
-
-        tic = time.time()
-        for i in range(steps): 
-            angle = initial_qpos + (next_servo_angle - initial_qpos) * (i + 1) / steps
-            if not self.is_alive:
-                raise ValueError("Robot is not alive!")
-            code = self._arm.set_servo_angle_j(angles=angle, is_radian=True, speed=1)
-            if not self._check_code(code, "set_position"):
-                raise ValueError("move Error")
-            time.sleep(self.MOVE_SLEEP)
-
-        self.log(f"move end: volecity: {distance/(time.time()-tic):.2f} mm/s")
-
-        if clean:
-            self._arm.clean_error()
-            self._arm.clean_warn()
-
+            
     # ======= xarm control END =======
 
     # ======= main thread loop =======
@@ -574,38 +478,33 @@ class XarmController(mp.Process):
         self.command_receiver = udpReceiver(ports={'xarm_control': port})
         self.command_receiver.start()
 
-        print(f"{'='*20} xarm start! state: {ControllerState(self.state.value)}")
-        self.reset()
         print(f"{'='*20} xarm reset! state: {ControllerState(self.state.value)}")
         
         command = None
         self.teleop_activated.value = False #if self.control_mode == 'joints' else True
-        rate = Rate(
-            duration=COMMAND_CHECK_INTERVAL,
+        exe_rate = Rate(
+            duration=1/self.COMMAND_EXECUTION_FREQ,
+        )
+        comm_rate = Rate(
+            duration=1/self.comm_update_fps,
         )
 
+        # NOTE: runs at command update freq
         while self.state.value == ControllerState.RUNNING.value:
             try:
-                start_time = time.time()
+                outer_start = time.time()
                 commands = self.command_receiver.get("xarm_control", pop=True)
-                command_timestamp = time.time()
                 if commands is None or len(commands[0]) == 0:
+                    # zero action case - fast loop
                     if self.control_mode == 'velocity_control':
                         self._arm.vc_set_joint_velocity([0, 0, 0, 0, 0, 0, 0], is_radian=True, is_sync=False, duration=0)
                     elif self.control_mode == 'position_control':
                         self._arm.set_servo_angle_j(angles=self._arm.get_servo_angle(is_radian=True)[1][:7], is_radian=True, speed=1.0, wait=False)
-                    elif self.control_mode == 'cartesian_position_planning':
-                        self._arm.set_position(x=500, y=0,z=300,roll=180,pitch=0,yaw=-90, speed=100, wait=True) # NOTE: hardcoded
-                    rate.sleep()
-                    # time.sleep(max(0, self.COMMAND_CHECK_INTERVAL - (time.time() - start_time)))
+                    exe_rate.sleep()
                     continue
 
-                print_commands = False
-                if len(commands[0]) > 0 and print_commands:
-                    if self.robot_id == 1:
-                        print('\t' * 12, end='')
-                    print(f'activated: {self.teleop_activated.value}, commands: {[np.round(c, 4) for c in commands[0]]}')
-                # continue  # enable for debug
+                # if len(commands[0]) > 0:
+                #     print(f'activated: {self.teleop_activated.value}, commands: {[np.round(c, 4) for c in commands[0]]}')
 
                 with self.exe_lock:
                     self.log("xarm controller get lock")
@@ -616,81 +515,56 @@ class XarmController(mp.Process):
                     for command in commands:
                         self.log(f"get command: {command}")
 
-                        if isinstance(command, str):
-                            if command == "quit":
-                                break
+                        command_goal = np.array(command)
+                        assert len(command_goal) == 8, "received gello-xarm qpos must be 8-dim"
 
-                            # elif command == "reset":  # TODO disable reset
-                            #     command = self.init_pose
-                        
-                        # convert to joint space target
-                        if self.control_mode == 'cartesian_position_planning':
-                            assert self.mismatch_kinematics == False, "currently cartesian position planning mode does not support mismatch kinematics"
-                            command_state = np.array(command) # joint space + gripper
-                            fk = self.robot_kin_helper.compute_fk_sapien_links(command_state[:7], [self.robot_kin_helper.sapien_eef_idx])[0] # compute fk with xarm7
+                        arm_state_goal = command_goal[0:7]  # (7,)
+                        gripper_goal = command_goal[-1] if self.gripper_enable else None
 
-                            fk_euler = transforms3d.euler.mat2euler(fk[:3, :3], axes='sxyz')
-                            command = np.array(list(fk[:3, 3]) + list(fk_euler)).astype(np.float32)
+                        curr_arm_state = np.array(self._arm.get_servo_angle()[1][0:7]) / 180. * np.pi
+                        prev_arm_state = curr_arm_state
 
+                        if self.mismatch_kinematics: # TODO: currently only support xarm7 teleop 
+                            teleop_cart = self.teleop_kin_helper.compute_fk_sapien_links(command_state[:7], [self.teleop_kin_helper.sapien_eef_idx])[0] # compute fk with xarm7
+                            teleop_cart_euler = transforms3d.euler.mat2euler(teleop_cart[:3, :3], axes='sxyz')
+                            cart_comm = np.array(list(teleop_cart[:3, 3]) + list(teleop_cart_euler)).astype(np.float32)
+                            command = self.robot_kin_helper.compute_ik_sapien(current_joints, cart_comm) # compute ik with ur850
                             if self.gripper_enable:
-                                command = np.concatenate([command, command_state[-1:]]) # cartesian space + gripper
+                                command = np.concatenate([command, command_state[-1:]])
 
-                            # low level control
-                            self.cartesian_position_control(command)
+                        # check teleop activated and safety
+                        next_arm_state = self.preprocess_command(arm_state_goal=arm_state_goal, curr_arm_state=curr_arm_state)
 
-                        elif self.control_mode == 'velocity_control' or self.control_mode == 'position_control':
-                            command_state = np.array(command)
-                            assert len(command_state) == 8, "received gello-xarm qpos must be 8-dim"
+                        while time.time() - outer_start < 1.0 / self.comm_update_fps: # while didn't pass 
+                            inner_t = time.time()
+                            alpha = np.clip((inner_t - outer_start) * self.comm_update_fps, 0, 1)
 
-                            # obtain current robot state
-                            current_joints = np.array(self._arm.get_servo_angle()[1][0:7]) / 180. * np.pi
-                            if self.gripper_enable:
-                                current_gripper = self.get_gripper_state()
-                                current_gripper = (current_gripper - GRIPPER_OPEN_MAX) / (GRIPPER_OPEN_MIN - GRIPPER_OPEN_MAX)
-                                current_state = np.concatenate([current_joints, np.array([current_gripper])])
-                            else:
-                                current_state = current_joints
+                            interp_next_state = interpolate(curr_arm_state, next_arm_state, alpha)
 
-                            if self.mismatch_kinematics:
-                                # robot_cart = self.robot_kin_helper.compute_fk_sapien_links(current_joints, [self.robot_kin_helper.sapien_eef_idx])[0] # compute fk with xarm7
-                                teleop_cart = self.teleop_kin_helper.compute_fk_sapien_links(command_state[:7], [self.teleop_kin_helper.sapien_eef_idx])[0] # compute fk with xarm7
-                                teleop_cart_euler = transforms3d.euler.mat2euler(teleop_cart[:3, :3], axes='sxyz')
-                                cart_comm = np.array(list(teleop_cart[:3, 3]) + list(teleop_cart_euler)).astype(np.float32)
-                                # print('fk pos:', teleop_cart[:3, 3], 'fk euler:', np.array(teleop_cart_euler) / np.pi * 180, "gripper", command_state[-1])
-                                command = self.robot_kin_helper.compute_ik_sapien(current_joints, cart_comm) # compute ik with ur850
-                                if self.gripper_enable:
-                                    command = np.concatenate([command, command_state[-1:]])
-
-                            # check teleop activated
-                            delta = command_state - current_state # joint space + gripper
-                            joint_delta_norm = np.linalg.norm(delta[0:7])
-                            max_joint_delta = np.abs(delta[0:7]).max()
-                            # print('teleop activated:', self.teleop_activated.value, 'command latency:', time.time() - command_timestamp, 'command_state:', command_state, 'current_state:', current_state)
-
-                            max_activate_delta = 0.5
-                            max_delta_norm = 0.10
-                            if not self.teleop_activated.value:
-                                if max_joint_delta < max_activate_delta:
-                                    self.teleop_activated.value = True
-                                next_state = current_state
-                            else:
-                                if joint_delta_norm > max_delta_norm:
-                                    delta[0:7] = delta[0:7] / joint_delta_norm * max_delta_norm # upper bounds delta at: max_delta_norm
-                                next_state = current_state + delta
-
-                            # print('next_state:', next_state)
                             # communicate to low-level control
                             if self.control_mode == 'position_control':
-                                self.position_control(next_state, current_state, self.ema_factor)
+                                self.position_control(
+                                    next_arm_goal=interp_next_state, 
+                                    prev_arm_goal=prev_arm_state, 
+                                    next_gripper=gripper_goal,
+                                    ema_factor=self.ema_factor)
+                                prev_arm_state = interp_next_state
                             elif self.control_mode == 'velocity_control':
-                                self.velocity_control(next_state, current_state, self.ema_factor)
+                                raise NotImplementedError("velocity control with interpolation not supported yet")
+                                self.velocity_control(
+                                    next_arm_state, 
+                                    curr_arm_state, 
+                                    self.ema_factor)
+
+                            exe_rate.sleep()
+                            # print(f"xarm inner loop exe freq: {1/(time.time()-inner_t):.2f} Hz")
 
                     if command == "quit":
                         break
-                
-                rate.sleep()
-                # time.sleep(max(0, self.COMMAND_CHECK_INTERVAL - (time.time() - start_time)))
-            
+
+                comm_rate.sleep()
+                # print(f"xarm outer loop comm freq: {1/(time.time()-outer_start):.2f} Hz")
+
             except BaseException as e:
                 self.log(f"Error in xarm controller: {e.with_traceback()}")
                 break
