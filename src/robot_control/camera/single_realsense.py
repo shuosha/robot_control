@@ -133,8 +133,8 @@ class SingleRealsense(mp.Process):
                 f'Serial number {serial_number} not found in connected devices. '
                 'Please check if the camera is connected and the serial number is correct.'
             )
-        if self.color_sensor_available.value:
-            print(f'[SingleRealsense {self.serial_number}] Color sensor available.')
+        # if self.color_sensor_available.value:
+        #     print(f'[SingleRealsense {self.serial_number}] Color sensor available.')
     
     @staticmethod
     def get_connected_devices_serial():
@@ -473,7 +473,7 @@ class SingleRealsense(mp.Process):
                     cmd = command['cmd']
                     if cmd == Command.SET_COLOR_OPTION.value:
                         try:
-                            print(f'[SingleRealsense {self.serial_number}] Setting color option {command["option_enum"]} to {command["option_value"]}.')
+                            # print(f'[SingleRealsense {self.serial_number}] Setting color option {command["option_enum"]} to {command["option_value"]}.')
                             sensor = self.pipeline_profile.get_device().first_color_sensor()
                             option = rs.option(command['option_enum'])
                             value = float(command['option_value'])

@@ -5,18 +5,14 @@ from robot_control.data_processing.postprocesser import synchronize_timesteps, l
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('name', type=str, default='')
-    parser.add_argument('--mode', type=str, default='synchronize', choices=['synchronize', 'load_robot_data'])
+    parser.add_argument('data_path', type=str, default='')
+    parser.add_argument('--mode', type=str, default='synchronize', choices=['synchronize'])
     args = parser.parse_args()
 
-    assert args.name != '', "Please provide a name for the experiment"
+    assert args.data_path != '', "Please provide a name for the experiment"
 
     if args.mode == 'synchronize':
-        num_cams = 2
-        dir_name = "teleop"
-        synchronize_timesteps(name=args.name, num_cams=num_cams, dir_name=dir_name)
-    elif args.mode == 'load_robot_data':
-        dir_name = "teleop"
-        load_robot_trajectories(name=args.name, dir_name=dir_name)
+        synchronize_timesteps(data_path=args.data_path)
+        load_robot_trajectories(data_path=args.data_path)
     else:
         raise NotImplementedError(f"Mode {args.mode} not supported yet")

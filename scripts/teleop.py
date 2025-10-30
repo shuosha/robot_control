@@ -15,7 +15,7 @@ from robot_control.modules.robot_env import RobotEnv
 
 """
 Example usage:  
-    python scripts/teleop.py --name teleop_test
+    python scripts/teleop.py teleop_test
 """
 
 if __name__ == '__main__':
@@ -30,7 +30,7 @@ if __name__ == '__main__':
     parser.add_argument('name', type=str, default='')
     parser.add_argument('--bimanual', action='store_true')
     parser.add_argument('--pusht', action='store_true', default=False)
-    parser.add_argument('--input_mode', type=str, default='gello', choices=["gello", "keyboard", "policy", "replay"])
+    parser.add_argument('--input_mode', type=str, default='gello', choices=["gello", "keyboard"])
     parser.add_argument('--init_pose', type=list, default=[0.0, -45.0, 0.0, 30.0, 0.0, 75.0, 0.0, 0.0])
     parser.add_argument('--robot', type=str, default='xarm7', choices=['xarm7', 'aloha', 'uf850'])
     parser.add_argument('--robot_ip', type=str, default="192.168.1.196")

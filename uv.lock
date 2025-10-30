@@ -4000,15 +4000,6 @@ wheels = [
 ]
 
 [[package]]
-name = "pyperclip"
-version = "1.11.0"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/e8/52/d87eba7cb129b81563019d1679026e7a112ef76855d6159d24754dbd2a51/pyperclip-1.11.0.tar.gz", hash = "sha256:244035963e4428530d9e3a6101a1ef97209c6825edab1567beac148ccc1db1b6", size = 12185, upload-time = "2025-09-26T14:40:37.245Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/df/80/fc9d01d5ed37ba4c42ca2b55b4339ae6e200b456be3a1aaddf4a9fa99b8c/pyperclip-1.11.0-py3-none-any.whl", hash = "sha256:299403e9ff44581cb9ba2ffeed69c7aa96a008622ad0c46cb575ca75b5b84273", size = 11063, upload-time = "2025-09-26T14:40:36.069Z" },
-]
-
-[[package]]
 name = "pyqt5"
 version = "5.15.11"
 source = { registry = "https://pypi.org/simple" }
@@ -4502,7 +4493,7 @@ requires-dist = [
     { name = "pyqt5", specifier = ">=5.15.11" },
     { name = "pyrealsense2", specifier = "==2.55.1.6486" },
     { name = "pytest", specifier = ">=8.4.2" },
-    { name = "sapien", specifier = ">=3.0.1" },
+    { name = "sapien", specifier = "==2.2" },
     { name = "scipy", specifier = ">=1.16.2" },
     { name = "sharedmemory", specifier = ">=1.6.0" },
     { name = "torch", specifier = "==2.7.1" },
@@ -4655,25 +4646,16 @@ wheels = [
 
 [[package]]
 name = "sapien"
-version = "3.0.1"
+version = "2.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "lxml" },
-    { name = "networkx" },
     { name = "numpy" },
     { name = "opencv-python" },
-    { name = "pyperclip" },
     { name = "requests" },
-    { name = "setuptools" },
     { name = "transforms3d" },
 ]
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/1a/76/53c526d1c89253dc465a9a4a17d6acd2d1e8abab840aa9a4c39154784405/sapien-3.0.1-cp311-cp311-manylinux_2_28_x86_64.whl", hash = "sha256:2d1d3f17c1d67d93af74dddf760db9947999c6d9607b8b9bcdf9b42215de7463", size = 51299281, upload-time = "2025-08-13T19:16:36.799Z" },
-    { url = "https://files.pythonhosted.org/packages/0a/4a/e4e9956133c931863905e1ddb8d3a1bfafd362b6b28783a099d1e99324cc/sapien-3.0.1-cp311-cp311-win_amd64.whl", hash = "sha256:9807dc892a85a6f491f82732611967d2f911076513c5b82d68b0be5532dcb4d5", size = 44554987, upload-time = "2025-08-13T19:16:41.139Z" },
-    { url = "https://files.pythonhosted.org/packages/aa/ac/917cd3c7dd8ac4e29e4361e7a5a7a1d72341cd275a1967984fecbe7fa370/sapien-3.0.1-cp312-cp312-manylinux_2_28_x86_64.whl", hash = "sha256:05a79a6ab6b8cf9fa40b14d85531e8ebacfbfb8d724fd0181a58a5f5bf754131", size = 51295373, upload-time = "2025-08-13T19:16:45.018Z" },
-    { url = "https://files.pythonhosted.org/packages/05/e6/c67425738c8935f0cb0bc55c33cccc7bd6850faa3863fc3a759175849983/sapien-3.0.1-cp312-cp312-win_amd64.whl", hash = "sha256:02dffbcff60e20b69ca1eea5613f76f1221f3999e5b9e83180853685bdfb0bbb", size = 44555213, upload-time = "2025-08-13T19:16:49.082Z" },
-    { url = "https://files.pythonhosted.org/packages/1f/d8/841d95fcf50618b8840e9a33baf0d0540c80e175f4a0202ff8b0081a0538/sapien-3.0.1-cp313-cp313-manylinux_2_28_x86_64.whl", hash = "sha256:0b9460be5ad7c604636e57d97da5d716164904963f75db5d58939a400a542491", size = 51295659, upload-time = "2025-08-13T19:16:53.129Z" },
-    { url = "https://files.pythonhosted.org/packages/15/5e/c241c0eaed7c508866ee168735903ee427421d6b167e43a2443f7d8608d1/sapien-3.0.1-cp313-cp313-win_amd64.whl", hash = "sha256:a1237c8b6b684e4fbc87874eb899ce51829e67854c7658ae76db21c94330636e", size = 44555178, upload-time = "2025-08-13T19:16:57.744Z" },
+    { url = "https://files.pythonhosted.org/packages/9e/be/40cefc64ad9cc8d0a405ed30487f94921e4723bb14cd70f567cc42e6f66b/sapien-2.2.0-cp311-cp311-manylinux2014_x86_64.whl", hash = "sha256:a54c7c6d8069c3dbdb01cbb1fc9749ae1db3edda5343c0e22be54f95319fe9c8", size = 39092971, upload-time = "2023-02-03T07:15:25.274Z" },
 ]
 
 [[package]]

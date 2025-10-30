@@ -15,6 +15,8 @@ import sapien.core as sapien
 from robot_control.utils.utils import get_root
 root: Path = get_root(__file__)
 
+_ENGINE = None
+
 def np2o3d(pcd, color=None):
     # pcd: (n, 3)
     # color: (n, 3)
@@ -102,12 +104,13 @@ class KinHelper():
         # load sapien robot
         if sapien_env_tuple is not None:
             engine, scene, loader = sapien_env_tuple
-            self.engine = engine
-            self.scene = scene
         else:
-            self.engine = sapien.Engine()
-            self.scene = self.engine.create_scene()
-            loader = self.scene.create_urdf_loader()
+            global _ENGINE
+            if _ENGINE is None:
+                _ENGINE = sapien.Engine()            # create once
+            engine = _ENGINE
+            scene = engine.create_scene()
+            loader = scene.create_urdf_loader()
         self.sapien_robot = loader.load(urdf_path)
         self.robot_model = self.sapien_robot.create_pinocchio_model()
         self.sapien_eef_idx = -1

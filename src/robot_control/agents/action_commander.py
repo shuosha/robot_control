@@ -264,7 +264,9 @@ class ActionAgent(mp.Process):
             self.command_sender_right.close()
         else:
             self.command_sender.close()
-        self.gello_listener.stop()
+
+        if self.gello_listener is not None:
+            self.gello_listener.stop()
         self.keyboard_listener.stop()
         # self.update_joints_t.join()
         print(f"{'='*20} keyboard + gello teleop exit!")

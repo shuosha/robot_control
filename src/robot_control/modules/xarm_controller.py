@@ -7,8 +7,19 @@ import traceback
 import numpy as np
 import transforms3d
 import copy
+import os, sys, contextlib
 
-from xarm.wrapper import XArmAPI
+@contextlib.contextmanager
+def suppress_stdout():
+    with open(os.devnull, "w") as devnull:
+        old_stdout, old_stderr = sys.stdout, sys.stderr
+        sys.stdout, sys.stderr = devnull, devnull
+        try:
+            yield
+        finally:
+            sys.stdout, sys.stderr = old_stdout, old_stderr
+with suppress_stdout():
+    from xarm.wrapper import XArmAPI
 
 from robot_control.utils.kinematics_utils import KinHelper
 from robot_control.utils.udp_util import udpReceiver, udpSender
@@ -330,7 +341,7 @@ class XarmController(mp.Process):
             K_ori = 4           #  Rx/Ry/Rz rotational stiffness coefficient, range: 0 ~ 20 (Nm/rad)
 
             # Attention: for M and J, smaller value means less effort to drive the arm, but may also be less stable, please be careful. 
-            M = float(0.1)  #  x/y/z equivalent mass; range: 0.02 ~ 1 kg
+            M = float(0.1)   #  x/y/z equivalent mass; range: 0.02 ~ 1 kg
             J = M * 0.01     #  Rx/Ry/Rz equivalent moment of inertia, range: 1e-4 ~ 0.01 (Kg*m^2)
 
             c_axis = [1,1,1,0,0,0] # set z axis as compliant axis
@@ -351,29 +362,29 @@ class XarmController(mp.Process):
             self._arm.set_state(0)
 
             code, config = self._arm.get_ft_sensor_config()
-            if code == 0:
-                print('ft_mode: {}'.format(config[0]))
-                print('ft_is_started: {}'.format(config[1]))
-                print('ft_type: {}'.format(config[2]))
-                print('ft_id: {}'.format(config[3]))
-                print('ft_freq: {}'.format(config[4]))
-                print('ft_mass: {}'.format(config[5]))
-                print('ft_dir_bias: {}'.format(config[6]))
-                print('ft_centroid: {}'.format(config[7]))
-                print('ft_zero: {}'.format(config[8]))
-                print('imp_coord: {}'.format(config[9]))
-                print('imp_c_axis: {}'.format(config[10]))
-                print('M: {}'.format(config[11]))
-                print('K: {}'.format(config[12]))
-                print('B: {}'.format(config[13]))
-                print('f_coord: {}'.format(config[14]))
-                print('f_c_axis: {}'.format(config[15]))
-                print('f_ref: {}'.format(config[16]))
-                print('f_limits: {}'.format(config[17]))
-                print('kp: {}'.format(config[18]))
-                print('ki: {}'.format(config[19]))
-                print('kd: {}'.format(config[20]))
-                print('xe_limit: {}'.format(config[21]))
+            # if code == 0:
+            #     print('ft_mode: {}'.format(config[0]))
+            #     print('ft_is_started: {}'.format(config[1]))
+            #     print('ft_type: {}'.format(config[2]))
+            #     print('ft_id: {}'.format(config[3]))
+            #     print('ft_freq: {}'.format(config[4]))
+            #     print('ft_mass: {}'.format(config[5]))
+            #     print('ft_dir_bias: {}'.format(config[6]))
+            #     print('ft_centroid: {}'.format(config[7]))
+            #     print('ft_zero: {}'.format(config[8]))
+            #     print('imp_coord: {}'.format(config[9]))
+            #     print('imp_c_axis: {}'.format(config[10]))
+            #     print('M: {}'.format(config[11]))
+            #     print('K: {}'.format(config[12]))
+            #     print('B: {}'.format(config[13]))
+            #     print('f_coord: {}'.format(config[14]))
+            #     print('f_c_axis: {}'.format(config[15]))
+            #     print('f_ref: {}'.format(config[16]))
+            #     print('f_limits: {}'.format(config[17]))
+            #     print('kp: {}'.format(config[18]))
+            #     print('ki: {}'.format(config[19]))
+            #     print('kd: {}'.format(config[20]))
+            #     print('xe_limit: {}'.format(config[21]))
 
         
         self.state.value = ControllerState.RUNNING.value

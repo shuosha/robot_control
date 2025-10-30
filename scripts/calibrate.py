@@ -146,8 +146,15 @@ def _read_json(path: Path) -> dict:
     return json.loads(path.read_text())
 
 
-def _write_json(path: Path, payload: dict) -> None:
-    path.write_text(json.dumps(payload, indent=2))
+def _to_serializable(obj):
+    if isinstance(obj, np.ndarray):
+        return obj.tolist()
+    if isinstance(obj, (np.float32, np.float64, np.int32, np.int64)):
+        return obj.item()
+    raise TypeError(f"Object of type {type(obj).__name__} is not JSON serializable")
+
+def _write_json(path, payload):
+    path.write_text(json.dumps(payload, indent=2, default=_to_serializable))
 
 
 def _pair_key(src: str, dst: str) -> str:
@@ -231,6 +238,7 @@ def _estimate_wrist2other_via_charuco(
             combo = np.hstack((vis_w, vis_o))
             cv2.imshow(f"Charuco Wrist | {other} (any key to continue)", combo)
             cv2.waitKey(0)
+            cv2.destroyAllWindows()
 
     if not T_As:
         return None
@@ -272,7 +280,7 @@ class HandEyeCalibrator:
         self.intr_path = self.work_dir / "intrinsics.json"
 
         if self.init_robot and self.robot_ip is not None:
-            self.robot = XArmRobot(ip=self.robot_ip, control_frequency=500.0, max_delta=0.001)
+            self.robot = XArmRobot(ip=self.robot_ip, control_frequency=500.0, max_delta=0.005)
 
     # 1) fixed calibration: per-camera board2cam + intrinsics (+ save visualization)
     def fixed_calibration(self, serials: Dict[str, str]) -> None:
@@ -311,6 +319,7 @@ class HandEyeCalibrator:
                     if self.show_gui:
                         cv2.imshow(f"{cam_name}: Charuco not detected", bgr)
                         cv2.waitKey(0)
+                        cv2.destroyAllWindows()
                     raise RuntimeError(f"Charuco not detected for camera '{cam_name}'.")
 
                 ok, rvec, tvec = cv2.aruco.estimatePoseCharucoBoard(
@@ -327,17 +336,21 @@ class HandEyeCalibrator:
 
                 # Save visualization
                 vis = cv2.aruco.drawDetectedMarkers(bgr.copy(), mc, mid)
+                cv2.imwrite(str(self.marked_images_dir / f"{cam_name}_fixed_calibration_marker.png"), vis)
+                vis = bgr.copy()
                 cv2.drawFrameAxes(vis, mtx, np.zeros(5), rvec, tvec, CHECKER_SIZE_M * 2)
-                cv2.imwrite(str(self.marked_images_dir / f"{cam_name}_fixed_calibration.png"), vis)
+                cv2.imwrite(str(self.marked_images_dir / f"{cam_name}_fixed_calibration_axes.png"), vis)
                 if self.show_gui:
                     cv2.imshow(f"{cam_name} Charuco", vis)
                     cv2.waitKey(0)
+                    cv2.destroyAllWindows()
 
             finally:
                 cam.stop()
 
         _write_json(self.extr_path, extr)
         _write_json(self.intr_path, intr)
+        cv2.destroyAllWindows()
 
     # 2a) wrist data capture (images + EE poses)
     def capture_wrist_images(self, wrist_serial: Optional[str]) -> None:
@@ -378,7 +391,8 @@ class HandEyeCalibrator:
 
                 if self.show_gui:
                     cv2.imshow(f"Wrist image {idx}", img)
-                    cv2.waitKey(0)
+                    cv2.waitKey(1000)
+                    cv2.destroyAllWindows()
 
         finally:
             print("Returning robot to initial pose...")
@@ -403,15 +417,25 @@ class HandEyeCalibrator:
         R_chk2cam_list, t_chk2cam_list = [], []
         for idx, img in enumerate(wrist_images):
             if img is None:
+                print(f"[handeye_calibration] skipped unreadable wrist image at index {idx}")
+                Rees.pop(idx)
+                tees.pop(idx)
                 continue
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             cc, ids, mc, mid = DETECTOR.detectBoard(gray)
             if cc is None or len(cc) < 4:
+                print(f"[handeye_calibration] not enough ChArUco corners in wrist image at index {idx}, skipping")
+                Rees.pop(idx)
+                tees.pop(idx)
+                import pdb; pdb.set_trace()
                 continue
             ok, rvec, tvec = cv2.aruco.estimatePoseCharucoBoard(
                 cc, ids, CALIB_BOARD, wrist_mtx, np.zeros(5), None, None
             )
             if not ok:
+                print(f"[handeye_calibration] pose failure in wrist image at index {idx}, skipping")
+                Rees.pop(idx)
+                tees.pop(idx)
                 continue
             R_chk, _ = cv2.Rodrigues(rvec)
             R_chk2cam_list.append(R_chk)
@@ -423,7 +447,8 @@ class HandEyeCalibrator:
             cv2.imwrite(str(self.marked_images_dir / f"handeye_calibration_{idx}.png"), vis)
             if self.show_gui:
                 cv2.imshow(f"Hand-Eye {idx}", vis)
-                cv2.waitKey(0)
+                cv2.waitKey(1000)
+                cv2.destroyAllWindows()
 
         if not R_chk2cam_list:
             raise RuntimeError("handeye_calibration(): no valid ChArUco detections in wrist images.")
@@ -434,6 +459,8 @@ class HandEyeCalibrator:
         extr["wristcam2ee"] = np.asarray(T_wristcam2ee, dtype=float).tolist()
         extr["ee2base"] = np.asarray(T_ee2base, dtype=float).tolist()
         _write_json(self.extr_path, extr)
+
+        print("handeye_calibration(): wrote wristcam2ee and ee2base")
 
         return T_wristcam2ee, T_ee2base
 
@@ -523,12 +550,13 @@ if __name__ == "__main__":
     parser.add_argument("--work-dir", required=True, help="folder to save calibration info")
     parser.add_argument("--mode", choices=["fixed", "handeye", "compose", "all"], required=True)
     parser.add_argument("--robot-ip", default="192.168.1.196", help="xArm robot IP")
-    parser.add_argument("--show-gui", action="store_true", default=True)
+    parser.add_argument("--show-gui", action="store_true", default=False)
     args = parser.parse_args()
 
     work_dir = Path(args.work_dir).expanduser()
     # Example serials—replace with your own:
-    serials = {"wrist": "130322270735", "side": "239222303153"}
+    # serials = {"wrist": "130322270735", "side": "239222303153", "base": "239222300740"}
+    serials = {"wrist": "130322270735", "front": "239222300740"}
 
     if args.mode == "fixed":
         cal = HandEyeCalibrator(work_dir=work_dir, robot_ip=None, show_gui=args.show_gui, init_robot=False)

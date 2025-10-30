@@ -64,28 +64,29 @@ def _is_quat_key(key_main: str) -> bool:
 
 
 def synchronize_timesteps(
-    name: str,
+    data_path: str,
     recording_dirs: Optional[Dict[str, List[str]]] = None,
-    num_cams: int = 4,
-    dir_name: str = "data",
     bimanual: bool = False,
 ):
     """
     Build synchronized episodes by matching camera frames to the closest
     robot obs/action times and interpolating robot values at each master frame time.
+    data_path: full path to the recording root directory.
+    Example: '/home/user/projects/logs/data/20251029_mnet'
     """
+    base = Path(data_path).expanduser().resolve()
+
     # Discover recordings if not provided
     if recording_dirs is None:
-        base = root / "logs" / dir_name / name
         # folders directly under .../<name> that are not reserved
         candidates = [p for p in sorted(base.iterdir()) if p.is_dir()]
         # filter out reserved names robustly using Path.name
         reserved = {"calibration", "robot_obs", "robot_action", "infos"}
         action_names = [p.name for p in candidates if p.name not in reserved]
-        recording_dirs = {name: action_names}
+        recording_dirs = {base.name: action_names}
 
-    name_save = f"{name}_processed"
-    out_root = root / "logs" / dir_name / name_save
+    name_save = base.name + "_processed"
+    out_root = base.parent / name_save
     mkdir(out_root, overwrite=False, resume=True)
 
     debug_dir = out_root / "debug"
@@ -93,7 +94,7 @@ def synchronize_timesteps(
 
     episode_idx = 0
     for recording_name, action_name_list in recording_dirs.items():
-        rec_dir = root / "logs" / dir_name / recording_name
+        rec_dir = base
         calibration_dir = rec_dir / "calibration"
         robot_obs_dir = rec_dir / "robot_obs"
         robot_action_dir = rec_dir / "robot_action"
@@ -114,6 +115,14 @@ def synchronize_timesteps(
             if (action_dir / "failed.txt").exists():
                 continue
 
+            # Detect number of cameras
+            cam_src_dirs = sorted(
+                [p for p in (rec_dir / action_name).iterdir() if p.is_dir() and p.name.startswith("camera_")]
+            )
+            if not cam_src_dirs:
+                raise ValueError(f"No camera dirs found in {rec_dir}/{action_name_list[0]}")
+            num_cams = max(1, len(cam_src_dirs))
+
             # Read per-frame camera timestamps (list of per-cam times per line)
             ts_file = action_dir / "timestamps.txt"
             if not ts_file.exists():
@@ -132,7 +141,7 @@ def synchronize_timesteps(
                 episode_idx += 1
                 continue
             else:
-                print(f"[Processing] {ep_dir} ...")
+                print(f"[Processing] {ep_dir} with {num_cams} cameras...")
 
             mkdir(ep_dir, overwrite=True, resume=False)
             if calibration_dir.exists():
@@ -234,8 +243,7 @@ def synchronize_timesteps(
             episode_idx += 1
 
 def load_robot_trajectories(
-    name: str,
-    dir_name: str = "rollout",
+    data_path: str,
     out_filename: str = "robot_trajectories.npz",
 ) -> Dict[str, Dict[str, np.ndarray]]:
     """
@@ -259,10 +267,13 @@ def load_robot_trajectories(
     Saves the entire dict into one npz file:
         {data_dir}/debug/robot_trajectories.npz
     """
-    name = name + "_processed" if not name.endswith("_processed") else name
-    data_dir = root / "logs" / dir_name / name
+
+    data_dir = Path(data_path).expanduser().resolve()
+    if not data_dir.name.endswith("_processed"):
+        data_dir = data_dir.parent / f"{data_dir.name}_processed"
     out_path = data_dir / "debug" / out_filename
     out_path.parent.mkdir(parents=True, exist_ok=True)
+
     episodes = sorted([p for p in data_dir.glob("episode_*") if p.is_dir()])
 
     def _as1d(x, expect_len: int, key: str):

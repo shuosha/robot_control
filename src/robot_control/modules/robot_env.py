@@ -1,3 +1,18 @@
+import warnings
+warnings.filterwarnings("ignore", category=UserWarning, module="pygame.pkgdata")
+
+import os, sys, contextlib
+
+@contextlib.contextmanager
+def suppress_stdout():
+    with open(os.devnull, "w") as devnull:
+        old_stdout, old_stderr = sys.stdout, sys.stderr
+        sys.stdout, sys.stderr = devnull, devnull
+        try:
+            yield
+        finally:
+            sys.stdout, sys.stderr = old_stdout, old_stderr
+
 from typing import Callable, Sequence, List, Literal, Optional
 from enum import Enum
 import numpy as np
@@ -5,7 +20,10 @@ import multiprocess as mp
 import time
 import threading
 import cv2
-import pygame
+with suppress_stdout():
+    import pygame
+    pygame.init()
+
 import os
 import pickle
 import transforms3d
@@ -152,12 +170,12 @@ class RobotEnv(mp.Process):
             self.serial_numbers = list(self.realsense.cameras.keys())
         
         # NOTE: hardcoded exposure and white balance for consistency
-        self.realsense.set_exposure(exposure=200, gain=60, depth_exposure=10000, depth_gain=60)  # 100: bright, 60: dark
-        self.realsense.set_white_balance(3800)
+        # self.realsense.set_exposure(exposure=200, gain=60, depth_exposure=10000, depth_gain=60)  # 100: bright, 60: dark
+        # self.realsense.set_white_balance(3800)
 
         # -- optional -- automatic exposure and white balance
-        # self.realsense.set_exposure(exposure=None)
-        # self.realsense.set_white_balance(white_balance=None)
+        self.realsense.set_exposure(exposure=None)
+        self.realsense.set_white_balance(white_balance=None)
 
         self.capture_fps = capture_fps
         self.record_fps = record_fps
@@ -238,6 +256,7 @@ class RobotEnv(mp.Process):
                 assert action_traj is not None, "Action trajectory must be provided for replay mode"
                 self.action_traj = action_traj
                 self.total_timesteps = action_traj.shape[0]
+                print(f"Replay trajectory of {self.total_timesteps} actions")
             elif action_receiver == "policy":
                 # pass
                 # assert checkpoint_path is not None, "Checkpoint path must be provided for policy mode"
@@ -270,7 +289,6 @@ class RobotEnv(mp.Process):
         unscaled_height = img_h * num_cams       # e.g., 480 * 4 = 1920
 
         # Get max screen size
-        pygame.init()
         screen_info = pygame.display.Info()
         max_screen_w, max_screen_h = screen_info.current_w, screen_info.current_h
 
@@ -464,7 +482,6 @@ class RobotEnv(mp.Process):
         print("update_real_state stopped")
 
     def display_image(self):
-        pygame.init()
         self.image_window = pygame.display.set_mode((self.screen_width, self.screen_height))
         pygame.display.set_caption('Image Display Window')
         while self._alive.value:
@@ -527,6 +544,7 @@ class RobotEnv(mp.Process):
                 self.action_agent.command[:] = init_pose
                 time.sleep(max(0, 1 / fps - (time.time() - tic)))
             time.sleep(1)
+            print("Initial pose set")
 
             if self.action_receiver == "replay" or self.action_receiver == "policy":
                 self.action_agent.record_start.value = True
@@ -699,6 +717,20 @@ class RobotEnv(mp.Process):
                     print("current qpos:", qpos_out["value"])
                     print("qpos action:", action)
                     self.action_agent.command[:] = action
+
+                elif self.action_receiver == "replay":
+                    if idx < self.total_timesteps:
+                        action = self.action_traj[idx] # (8,) in cartesian
+                        print(f"action at timestep {idx}:", action)
+                        command = self.get_qpos_from_action_8d(action, qpos_out["value"]) # (8,) in joint space
+                        self.action_agent.command[:] = command
+                        idx += 1
+                    else:
+                        print("Replay finished")
+                        self.action_agent.record_stop.value = True
+                        self.action_agent.stop()
+                        self.stop()
+                        break
 
                 # action data
                 action_qpos_out = state.get("action_qpos_out", None)
