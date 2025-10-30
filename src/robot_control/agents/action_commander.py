@@ -226,11 +226,11 @@ class ActionAgent(mp.Process):
                 else: # non-teleop mode
                     if self.key_states["r"]:
                         self.reset.value = True
-                        self.log(f"keyboard robot reset: {self.reset.value}, resetting robot to default pose")
+                        # self.log(f"keyboard robot reset: {self.reset.value}, resetting robot to default pose")
                         self.record_stop.value = True
                     if self.key_states["s"]:
                         self.reset.value = False
-                        self.log(f"keyboard robot reset: {self.reset.value}")
+                        # self.log(f"keyboard robot reset: {self.reset.value}")
                         self.record_start.value = True
 
                     command = list(self.command)

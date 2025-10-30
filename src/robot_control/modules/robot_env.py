@@ -101,8 +101,8 @@ class RobotEnv(mp.Process):
         action_receiver: Literal["gello", "keyboard", "policy", "replay"] = "gello",
         action_agent_fps: float = 10.0,
         pusht_mode: bool = False,
-        init_pose: Sequence[float] | None = [],
-        action_traj: np.ndarray | None = None,
+        init_poses: List[np.ndarray] | None = [],
+        action_trajs: np.ndarray | None = None,
         checkpoint_path: str | None = None,
     ) -> None:
         """
@@ -138,8 +138,8 @@ class RobotEnv(mp.Process):
 
             --------------------- Control ---------------------
             action_receiver: Control input mode ("gello", "keyboard", "policy", or "replay").
-            init_pose: Initial robot pose.
-            action_traj: Action trajectory for replay mode (T, action_dim).
+            init_poses: List of initial robot poses.
+            action_trajs: Action trajectories for replay mode (T, action_dim).
             checkpoint_path: Path to policy checkpoint for policy mode.
         """
         super().__init__()
@@ -247,16 +247,16 @@ class RobotEnv(mp.Process):
 
         # ----------- input mode --------------
         self.action_receiver = action_receiver
-        self.init_pose = init_pose
+        self.init_poses = init_poses
 
         # action agent := module that communicates with the robot
         if self.robot_name == "xarm7":
             # assign variables based on action receiver
             if action_receiver == "replay":
-                assert action_traj is not None, "Action trajectory must be provided for replay mode"
-                self.action_traj = action_traj
-                self.total_timesteps = action_traj.shape[0]
-                print(f"Replay trajectory of {self.total_timesteps} actions")
+                assert action_trajs is not None, "Action trajectory must be provided for replay mode"
+                self.action_trajs = action_trajs
+                self.total_trajs = len(self.action_trajs)
+                print(f"Replaying {self.total_trajs} trajectories")
             elif action_receiver == "policy":
                 # pass
                 # assert checkpoint_path is not None, "Checkpoint path must be provided for policy mode"
@@ -534,12 +534,13 @@ class RobotEnv(mp.Process):
             raise NotImplementedError("Bimanual replay is not implemented yet")
         else:
             print("Resetting robot to initial pose (deg):", init_pose)
-            init_pose = [i/180.0 * np.pi for i in init_pose]  # degrees to radians
+            init_pose *= np.pi/180
             print("Initial pose (radians):", init_pose)
+            init_pose = init_pose.tolist()
 
             assert self.alive, "Environment must be running to set initial pose"
             self.xarm_controller.teleop_activated.value = True
-            for _ in range(100):
+            for _ in range(200):
                 tic = time.time()
                 self.action_agent.command[:] = init_pose
                 time.sleep(max(0, 1 / fps - (time.time() - tic)))
@@ -665,11 +666,22 @@ class RobotEnv(mp.Process):
             depths.append(np.zeros((resolution[1], resolution[0]), np.uint16))
 
         fps = self.record_fps if self.record_fps > 0 else self.realsense.capture_fps  # visualization fps
+        
+        timestep = 0
+        eps_idx = 0
+        new_eps = False
 
         if self.action_receiver == "replay" or self.action_receiver == "policy":
-            self.set_robot_initial_pose(self.init_pose, fps=fps)
-        
-        idx = 0
+            if len(self.init_poses) == 1:
+                init_pose = self.init_poses[0]
+            else:
+                init_pose = self.init_poses[eps_idx % len(self.init_poses)]
+            self.set_robot_initial_pose(init_pose, fps=fps)
+            print(f"Robot initial pose set for episode {eps_idx}")
+
+            if self.action_receiver == "replay":
+                total_timesteps = self.action_trajs[eps_idx].shape[0]
+
         while self.alive:
             try:
                 tic = time.time()
@@ -698,39 +710,58 @@ class RobotEnv(mp.Process):
                         rgbs[k] = v["color"]
                         depths[k] = v["depth"]
 
-                if self.action_receiver == "policy":
-                    env_obs = self._read_env_obs(rgbs, depths, trans_out, qpos_out, gripper_out)
+                if self.action_agent.reset.value:
+                    timestep = 0 
+                    if not new_eps: # restarting at 
+                        eps_idx += 1
+                        new_eps = True
+                        if self.action_receiver == "replay":
+                            if self.total_trajs <= eps_idx:
+                                print("All trajectories replayed, stopping environment")
+                                break
+                            total_timesteps = self.action_trajs[eps_idx].shape[0]
 
-                    # ---------- inspect env_obs ------------
-                    # for k, v in env_obs.items():
-                    #     if isinstance(v, list):
-                    #         for i in range(len(v)):
-                    #             print("shape", f"{k}[{i}]", np.array(v[i]).shape)
-                    #             print("dtype", f"{k}[{i}]", np.array(v[i]).dtype)
-                    #     elif isinstance(v, np.ndarray):
-                    #         print("shape", k, np.array(v).shape)
-                    #         print("dtype", k, np.array(v).dtype) 
-                    #     else:
-                    #         print("type", k, type(v))
+                        print(f"Resetting environment for episode {eps_idx}")
+                    
+                    init_pose = self.init_poses[eps_idx % len(self.init_poses)] * np.pi/180
+                    self.action_agent.command[:] = init_pose.tolist()
 
-                    action = self.policy.get_action(env_obs)
-                    print("current qpos:", qpos_out["value"])
-                    print("qpos action:", action)
-                    self.action_agent.command[:] = action
+                # after pressing 's' to start
+                elif not self.action_agent.reset.value:
+                    new_eps = False
+                    if self.action_receiver == "policy":
+                        env_obs = self._read_env_obs(rgbs, depths, trans_out, qpos_out, gripper_out)
 
-                elif self.action_receiver == "replay":
-                    if idx < self.total_timesteps:
-                        action = self.action_traj[idx] # (8,) in cartesian
-                        print(f"action at timestep {idx}:", action)
-                        command = self.get_qpos_from_action_8d(action, qpos_out["value"]) # (8,) in joint space
-                        self.action_agent.command[:] = command
-                        idx += 1
-                    else:
-                        print("Replay finished")
-                        self.action_agent.record_stop.value = True
-                        self.action_agent.stop()
-                        self.stop()
-                        break
+                        # ---------- inspect env_obs ------------
+                        # for k, v in env_obs.items():
+                        #     if isinstance(v, list):
+                        #         for i in range(len(v)):
+                        #             print("shape", f"{k}[{i}]", np.array(v[i]).shape)
+                        #             print("dtype", f"{k}[{i}]", np.array(v[i]).dtype)
+                        #     elif isinstance(v, np.ndarray):
+                        #         print("shape", k, np.array(v).shape)
+                        #         print("dtype", k, np.array(v).dtype) 
+                        #     else:
+                        #         print("type", k, type(v))
+
+                        action = self.policy.get_action(env_obs)
+                        print("current qpos:", qpos_out["value"])
+                        print("qpos action:", action)
+                        self.action_agent.command[:] = action
+
+                    elif self.action_receiver == "replay":
+                        if timestep == 0:
+                            print(f"Starting episode {eps_idx} with {total_timesteps} timesteps")
+                        if timestep < total_timesteps:
+                            action = self.action_trajs[eps_idx][timestep] # (8,) in cartesian
+                            # print(f"action at timestep {timestep}:", action)
+                            command = self.get_qpos_from_action_8d(action, qpos_out["value"]) # (8,) in joint space
+                            self.action_agent.command[:] = command
+                            timestep += 1
+                        else:
+                            print(f"Episode {eps_idx} finished after {timestep} timesteps")
+                            self.perception.set_record_stop()
+                            self.action_agent.reset.value = True
 
                 # action data
                 action_qpos_out = state.get("action_qpos_out", None)

@@ -484,7 +484,7 @@ class SingleRealsense(mp.Process):
                         # print('exposure', sensor.get_option(rs.option.exposure))
                         # print('gain', sensor.get_option(rs.option.gain))
                     elif cmd == Command.SET_DEPTH_OPTION.value:
-                        print(f'[SingleRealsense {self.serial_number}] Setting depth option {command["option_enum"]} to {command["option_value"]}.')
+                        # print(f'[SingleRealsense {self.serial_number}] Setting depth option {command["option_enum"]} to {command["option_value"]}.')
                         sensor = self.pipeline_profile.get_device().first_depth_sensor()  # .set_option(rs.option.inter_cam_sync_mode, 1 if self.is_master else 2)
                         option = rs.option(command['option_enum'])
                         value = float(command['option_value'])

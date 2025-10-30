@@ -15,7 +15,6 @@ if __name__ == '__main__':
         out_path = visualize_robot_trajectory_3D(npz_path=args.npz_path, eps_idx=args.eps)
         print(f"3D trajectory plot saved to: {out_path}")
     elif args.mode == 'ts':
-        out_path, _, _ = visualize_robot_timeseries(npz_path=args.npz_path, eps_idx=args.eps)
-        print(f"Time-series plot saved to: {out_path}")
+        visualize_robot_timeseries(npz_path=args.npz_path)
 
 

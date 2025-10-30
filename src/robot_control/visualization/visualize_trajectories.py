@@ -5,6 +5,7 @@ import numpy as np
 import matplotlib
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
+from typing import Union, Tuple
 
 
 def visualize_robot_trajectory_3D(
@@ -116,141 +117,82 @@ def visualize_robot_trajectory_3D(
 
 def visualize_robot_timeseries(
     npz_path: Union[str, Path],
-    eps_idx: int = 0,
-    out_path: Optional[Union[str, Path]] = None,
-    recenter: bool = True,
-) -> Tuple[Path, Optional[Path]]:
+    recenter: bool = False,
+):
     """
-    Plot 2D time-series for EEF positions (obs vs action), and (optionally) force xyz if present.
-
-    Expected NPZ keys per episode prefix "episode_xxx":
-      - "{ep}/obs.eef_pos"     -> (T, 3)
-      - "{ep}/action.eef_pos"  -> (T, 3)
-      - Optional "{ep}/obs.force"  -> (T, 6)  [first 3 = force xyz, last 3 = torque rpy]
-
-    Behavior
-    --------
-    - Produces a single PNG with 3 vertically stacked subplots (X/Y/Z position vs time),
-      plotting both obs and action on each axis.
-    - If force is present, also produces a second PNG with 3 vertically stacked subplots
-      (Fx/Fy/Fz vs time).
-    - If `recenter=True`, subtracts the first obs position so time 0 = (0,0,0).
-    - Returns (pos_plot_path, force_plot_path_or_None).
+    Plot time-series for all episodes in NPZ:
+      - Positions (obs vs action)
+      - Forces (Fx,Fy,Fz)
+      - Torques (Tx,Ty,Tz)
+    Saves plots into three folders: position_ts, force_ts, torque_ts.
     """
     npz_path = Path(npz_path)
     data = np.load(npz_path, allow_pickle=False)
-
-    # discover episodes
     ep_keys = sorted({k.split("/", 1)[0] for k in data.files})
     if not ep_keys:
         raise ValueError(f"No episodes found in {npz_path}")
-    if not (0 <= eps_idx < len(ep_keys)):
-        raise IndexError(f"eps_idx {eps_idx} out of range (0..{len(ep_keys)-1})")
-    ep = ep_keys[eps_idx]
 
-    # required arrays
-    try:
-        obs_pos = np.asarray(data[f"{ep}/obs.eef_pos"], dtype=np.float32)
-        act_pos = np.asarray(data[f"{ep}/action.eef_pos"], dtype=np.float32)
-    except KeyError as e:
-        raise KeyError(f"Missing required key in NPZ: {e}") from e
+    # Create output folders
+    parent = npz_path.parent
+    out_dirs = {
+        "pos": parent / "position_ts",
+        "force": parent / "force_ts",
+        "torque": parent / "torque_ts",
+    }
+    for d in out_dirs.values():
+        d.mkdir(exist_ok=True)
 
-    if obs_pos.ndim != 2 or obs_pos.shape[1] != 3:
-        raise ValueError(f"{ep}/obs.eef_pos must be (T,3); got {obs_pos.shape}")
-    if act_pos.ndim != 2 or act_pos.shape[1] != 3:
-        raise ValueError(f"{ep}/action.eef_pos must be (T,3); got {act_pos.shape}")
-    if len(obs_pos) != len(act_pos):
-        raise ValueError(f"Obs and action lengths differ: {len(obs_pos)} vs {len(act_pos)}")
-
-    # optional force: try "{ep}/obs.force" first, fall back to plain "obs.force" if one-episode NPZ
-    force_arr = None
-    force_key_candidates = [f"{ep}/obs.force", "obs.force"]
-    for k in force_key_candidates:
-        if k in data.files:
-            arr = np.asarray(data[k], dtype=np.float32)
-            if arr.ndim == 2 and arr.shape[1] == 6:
-                if len(arr) != len(obs_pos):
-                    # We allow force length mismatch but warn by aligning to min length.
-                    T = min(len(arr), len(obs_pos))
-                    arr = arr[:T]
-                    obs_pos = obs_pos[:T]
-                    act_pos = act_pos[:T]
-                force_arr = arr
-                break
-
-    # recenter (positions only)
-    if recenter:
-        origin = obs_pos[0].copy()
-        obs_pos = obs_pos - origin
-        act_pos = act_pos - origin
-
-    # time axis (index-based; replace with real timestamps if available)
-    T = len(obs_pos)
-    t = np.arange(T)
-
-    # output paths
-    if out_path is None:
-        out_path = npz_path.parent / f"{ep}_traj_timeseries.png"
-    out_path = Path(out_path)
-    out_path_force = out_path.with_name(out_path.stem + "_force.png")
-    out_path_torque = out_path.with_name(out_path.stem + "_torque.png")
-
-    # Use non-interactive backend for headless saving
-    matplotlib.use("Agg")
-
-    # -------------------------
-    # Positions: 3 stacked axes
-    # -------------------------
-    fig_pos, axs = plt.subplots(3, 1, figsize=(10, 7.5), sharex=True, constrained_layout=True)
-    labels = ["X (m)", "Y (m)", "Z (m)"]
-    for i, ax in enumerate(axs):
-        ax.plot(t, obs_pos[:, i], label="obs", linewidth=1.8)
-        ax.plot(t, act_pos[:, i], label="action", linewidth=1.8, linestyle="--")
-        ax.set_ylabel(labels[i])
-        ax.grid(True, alpha=0.3)
-        if i == 0:
-            ax.set_title(f"EEF Position Timeseries — {ep}")
-
-    axs[-1].set_xlabel("Time step")
-    axs[0].legend(loc="upper right", frameon=True)
-    fig_pos.savefig(out_path, dpi=150)
-    plt.close(fig_pos)
-    print(f"[saved] {out_path}")
-
-    # -------------------------
-    # Forces (optional)
-    # -------------------------
-    force_path = None
-    torque_path = None
-    if force_arr is not None:
-        fig_f, axs_f = plt.subplots(3, 1, figsize=(10, 7.5), sharex=True, constrained_layout=True)
-        flabels = ["Fx (N)", "Fy (N)", "Fz (N)"]
-        for i, ax in enumerate(axs_f):
-            ax.plot(t, force_arr[:, i], linewidth=1.8)
-            ax.set_ylabel(flabels[i])
+    def plot_xyz(arr, labels, title, save_path):
+        fig, axs = plt.subplots(3, 1, figsize=(10, 7.5), sharex=True, constrained_layout=True)
+        for i, ax in enumerate(axs):
+            ax.plot(np.arange(len(arr)), arr[:, i], linewidth=1.8)
+            ax.set_ylabel(labels[i])
             ax.grid(True, alpha=0.3)
-            if i == 0:
-                ax.set_title(f"EEF Force Timeseries — {ep} (xyz only)")
+        axs[0].set_title(title)
+        axs[-1].set_xlabel("Timestep")
+        fig.savefig(save_path, dpi=150)
+        plt.close(fig)
+        print(f"[saved] {save_path}")
 
-        axs_f[-1].set_xlabel("Time step")
-        fig_f.savefig(out_path_force, dpi=150)
-        plt.close(fig_f)
-        print(f"[saved] {out_path_force}")
-        force_path = out_path_force
+    for ep in ep_keys:
+        try:
+            obs = np.asarray(data[f"{ep}/obs.eef_pos"], dtype=np.float32)
+            act = np.asarray(data[f"{ep}/action.eef_pos"], dtype=np.float32)
+        except KeyError:
+            print(f"[warn] Missing obs/action for {ep}, skipping.")
+            continue
 
-        fig_f, axs_f = plt.subplots(3, 1, figsize=(10, 7.5), sharex=True, constrained_layout=True)
-        flabels = ["Tau_r (N)", "Tau_p (N)", "Tau_y (N)"]
-        for i, ax in enumerate(axs_f):
-            ax.plot(t, force_arr[:, -i], linewidth=1.8)
-            ax.set_ylabel(flabels[i])
-            ax.grid(True, alpha=0.3)
-            if i == 0:
-                ax.set_title(f"EEF Torque Timeseries — {ep} (rpy only)")
+        if recenter:
+            origin = obs[0].copy()
+            obs -= origin
+            act -= origin
 
-        axs_f[-1].set_xlabel("Time step")
-        fig_f.savefig(out_path_torque, dpi=150)
-        plt.close(fig_f)
-        print(f"[saved] {out_path_torque}")
-        torque_path = out_path_torque
+        # Position plots
+        fig, axs = plt.subplots(3, 1, figsize=(10, 7.5), sharex=True, constrained_layout=True)
+        for i, lbl in enumerate(["X (m)", "Y (m)", "Z (m)"]):
+            axs[i].plot(obs[:, i], label="obs", linewidth=1.8)
+            axs[i].plot(act[:, i], label="action", linestyle="--", linewidth=1.8)
+            axs[i].set_ylabel(lbl)
+            axs[i].grid(True, alpha=0.3)
+        axs[0].set_title(f"EEF Position Timeseries — {ep}")
+        axs[-1].set_xlabel("Timestep")
+        axs[0].legend()
+        fig.savefig(out_dirs["pos"] / f"{ep}_position.png", dpi=150)
+        plt.close(fig)
 
-    return out_path, force_path, torque_path
+        # Force/torque if available
+        fkey = f"{ep}/obs.force"
+        if fkey not in data:
+            continue
+
+        force_arr = np.asarray(data[fkey], dtype=np.float32)
+        if force_arr.ndim != 2 or force_arr.shape[1] != 6:
+            print(f"[warn] Bad shape {force_arr.shape} for {fkey}, skipping.")
+            continue
+
+        fx = force_arr[:, :3]
+        tx = force_arr[:, 3:]
+        plot_xyz(fx, ["Fx (N)", "Fy (N)", "Fz (N)"], f"EEF Force — {ep}", out_dirs["force"] / f"{ep}_force.png")
+        plot_xyz(tx, ["Tx (Nm)", "Ty (Nm)", "Tz (Nm)"], f"EEF Torque — {ep}", out_dirs["torque"] / f"{ep}_torque.png")
+
+    print(f"All plots saved under:\n  {out_dirs['pos']}\n  {out_dirs['force']}\n  {out_dirs['torque']}")

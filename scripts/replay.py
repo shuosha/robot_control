@@ -19,19 +19,31 @@ Example usage:
     python scripts/teleop.py replay data.npz
 """
 
-def load_npz(file_path: str, eps_idx: int):
+def load_npz(file_path: str):
     data = np.load(file_path, allow_pickle=True)
-    eps_idx = f"episode_{eps_idx:04d}"
-    cart_traj = np.concatenate((
-        data[f'{eps_idx}/action.eef_pos'], 
-        data[f'{eps_idx}/action.eef_quat'],
-        data[f'{eps_idx}/action.gripper']
-    ), axis=1)
-    init_pose = np.concatenate((
-        data[f'{eps_idx}/obs.qpos'][0] * 180.0 / np.pi,
-        data[f'{eps_idx}/obs.gripper'][0]
-    ))
-    return cart_traj, init_pose
+    cart_trajs = []
+    init_poses = []
+
+    eps_idx = 0
+    while True:
+        eps_name = f"episode_{eps_idx:04d}"
+        if f'{eps_name}/action.eef_pos' not in data:
+            break
+        cart_traj = np.concatenate((
+            data[f'{eps_name}/action.eef_pos'], 
+            data[f'{eps_name}/action.eef_quat'],
+            data[f'{eps_name}/action.gripper']
+        ), axis=1)
+        init_pose = np.concatenate((
+            data[f'{eps_name}/obs.qpos'][0] * 180.0 / np.pi,
+            data[f'{eps_name}/obs.gripper'][0]
+        ))
+
+        cart_trajs.append(cart_traj)
+        init_poses.append(init_pose)
+        eps_idx += 1
+
+    return cart_trajs, init_poses
 
 if __name__ == '__main__':
     # mp.set_start_method('spawn')  # type: ignore
@@ -39,7 +51,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('name', type=str, default='')
     parser.add_argument('rpz_path', type=str, default='')
-    parser.add_argument('--eps_idx', type=int, default=0)
     parser.add_argument('--bimanual', action='store_true')
     parser.add_argument('--pusht', action='store_true', default=False) # NOTE: not supported yet
     parser.add_argument('--robot_ip', type=str, default="192.168.1.196")
@@ -49,8 +60,8 @@ if __name__ == '__main__':
     assert args.name != '', "Please provide a name for the experiment"
     assert os.path.exists(args.rpz_path), f"Replay file {args.rpz_path} does not exist"
 
-    cart_traj, init_pose = load_npz(args.rpz_path, args.eps_idx)
-    assert len(init_pose) == 8, "xarm7 requires 8 DOF initial pose"
+    cart_trajs, init_poses = load_npz(args.rpz_path)
+    assert len(init_poses[0]) == 8, "xarm7 requires 8 DOF initial pose"
 
     env = RobotEnv(
         exp_name=args.name,
@@ -75,8 +86,8 @@ if __name__ == '__main__':
         action_agent_fps=10.0, # teleop & policy
         pusht_mode=args.pusht,
         action_receiver="replay",
-        action_traj=cart_traj, # (ts, 8) pos + quat + gripper # degrees
-        init_pose=init_pose, # (8,) # initial qpos + gripper
+        action_trajs=cart_trajs, # (ts, 8) pos + quat + gripper # degrees
+        init_poses=init_poses, # (8,) # initial qpos + gripper
     )
     
     env.start()

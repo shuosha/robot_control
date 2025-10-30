@@ -190,7 +190,7 @@ class Perception(mp.Process):
             assert self.record_restart.value == False
         else:
             self.record_restart.value = True
-            print("record restart cmd received")
+            # print("record restart cmd received")
 
     def set_record_stop(self):
         if self.record_fps == 0:
@@ -198,7 +198,7 @@ class Perception(mp.Process):
             assert self.record_stop.value == False
         else:
             self.record_stop.value = True
-            print("record stop cmd received")
+            # print("record stop cmd received")
     
     def set_record_failed(self):
         if self.record_fps == 0:
