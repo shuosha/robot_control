@@ -54,7 +54,7 @@ if __name__ == '__main__':
 
         resolution=(848, 480),
         capture_fps=30,
-        record_fps=15,
+        record_fps=30,
         perception_process_func=None,
 
         # robot
@@ -65,9 +65,9 @@ if __name__ == '__main__':
 
         # control
         control_mode="position_control",
-        admittance_control=True,
+        admittance_control=False,
         ema_factor=1.0,
-        action_agent_fps=15.0, # teleop & policy
+        action_agent_fps=10.0, # teleop & policy
         pusht_mode=args.pusht,
         action_receiver=args.input_mode,
         init_poses=init_poses,

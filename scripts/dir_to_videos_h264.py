@@ -47,7 +47,7 @@ def _bgr_to_rgb(img: np.ndarray) -> np.ndarray:
 # --------------------- 1) single videos (H.264) ---------------------
 
 def make_single_videos(root: Path, fps: int = 30, cam_idx: Optional[int] = None,
-                       pattern: str = "*.jpg") -> List[Tuple[int, Path]]:
+                       pattern: str = "*.jpg", eps_idx: Optional[int] = None) -> List[Tuple[int, Path]]:
     """
     Create H.264 per-episode videos:
       videos/eps_{04d}_cam_{idx}.mp4
@@ -71,7 +71,12 @@ def make_single_videos(root: Path, fps: int = 30, cam_idx: Optional[int] = None,
         print(f"[warn] no cameras found (filter cam_idx={cam_idx})")
         return outputs
 
+    if eps_idx is not None:
+        ep_name = f"episode_{eps_idx:04d}"
+        episodes = [ep for ep in episodes if ep.name == ep_name]
+
     for ep in episodes:
+
         m = re.findall(r"\d+", ep.name)
         ep_num = int(m[0]) if m else 0
         for c in cams:
@@ -122,11 +127,11 @@ def make_collage_videos(root: Path, fps: int = 30, cols: int = 7,
                         scale: float = 0.25, pattern: str = "*.jpg") -> None:
     """
     For each camera index:
-      - Collect all episodes having camera_{idx}/rgb/*.jpg
-      - Read frames directly from JPGs (no per-episode temp videos)
-      - Downscale each frame by 'scale'
-      - Arrange episodes in a grid (cols x rows), empty cells black
-      - Write H.264 video to videos/collage_cam_{idx}.mp4 (skip if exists)
+      - Gather episodes with camera_{idx}/rgb/*.jpg
+      - Downscale by 'scale'
+      - Grid (cols x rows)
+      - Shorter episodes loop their last frame so all end together
+      - Output: videos/collage_cam_{idx}.mp4
     """
     videos = _videos_dir(root)
     episodes = _list_episodes(root)
@@ -134,7 +139,6 @@ def make_collage_videos(root: Path, fps: int = 30, cols: int = 7,
         print("[warn] no episode_* found")
         return
 
-    # discover camera indices present across episodes
     cam_set = set()
     for ep in episodes:
         cam_set.update(_list_cameras(ep))
@@ -149,19 +153,18 @@ def make_collage_videos(root: Path, fps: int = 30, cols: int = 7,
             print(f"[skip] {out_mp4} (exists)")
             continue
 
-        # Build episode -> jpg list for this camera
+        # episode -> jpgs (for this camera)
         ep_jpgs: List[List[Path]] = []
         for ep in episodes:
             rgb_dir = ep / f"camera_{c}" / "rgb"
             if rgb_dir.is_dir():
-                jpgs = _natsorted_jpgs(rgb_dir, pattern)
-                if jpgs:
-                    ep_jpgs.append(jpgs)
-
+                lst = _natsorted_jpgs(rgb_dir, pattern)
+                if lst:
+                    ep_jpgs.append(lst)
         if not ep_jpgs:
             continue
 
-        # Determine cell size from first readable frame
+        # Determine cell size from the first readable frame
         first_frame = None
         for lst in ep_jpgs:
             f0 = cv2.imread(str(lst[0]))
@@ -178,39 +181,26 @@ def make_collage_videos(root: Path, fps: int = 30, cols: int = 7,
         rows = math.ceil(len(ep_jpgs) / cols)
         canvas_h, canvas_w = rows * H, cols * W
 
-        # Build simple per-episode indices
-        idxs = [0 for _ in ep_jpgs]
         lens = [len(lst) for lst in ep_jpgs]
+        max_len = max(lens)
 
-        def collage_frames() -> Iterable[np.ndarray]:
-            # continue until all episode streams are exhausted
-            while True:
-                if all(i >= n for i, n in zip(idxs, lens)):
-                    break
+        def collage_frames():
+            for t in range(max_len):
                 canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.uint8)
-
-                for k, (i, n) in enumerate(zip(idxs, lens)):
+                for k, n in enumerate(lens):
                     r, col = divmod(k, cols)
                     y0, y1 = r * H, (r + 1) * H
                     x0, x1 = col * W, (col + 1) * W
-
-                    if i >= n:
-                        # finished → leave black
-                        continue
-
-                    p = ep_jpgs[k][i]
+                    idx = min(t, n - 1)  # loop last frame once episode ends
+                    p = ep_jpgs[k][idx]
                     img = cv2.imread(str(p))
                     if img is None:
-                        idxs[k] += 1
                         continue
                     if scale != 1.0:
                         img = cv2.resize(img, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
                     if img.shape[:2] != (H, W):
                         img = cv2.resize(img, (W, H), interpolation=cv2.INTER_AREA)
-
                     canvas[y0:y1, x0:x1] = _bgr_to_rgb(img)
-                    idxs[k] += 1
-
                 yield canvas
 
         with imageio.get_writer(
@@ -218,31 +208,33 @@ def make_collage_videos(root: Path, fps: int = 30, cols: int = 7,
             fps=fps,
             codec="libx264",
             pixelformat="yuv420p",
-            macro_block_size=None,   # avoid forced resizing to 16x blocks
+            macro_block_size=None,
         ) as w:
-            for f in collage_frames():       # f must be RGB (H,W,3) uint8
+            for f in collage_frames():
                 w.append_data(f)
 
         print(f"[ok] {out_mp4}")
+
 
 # ------------------------------- CLI -------------------------------
 
 def main():
     ap = argparse.ArgumentParser("Make per-episode singles and per-camera collage videos (H.264)")
     ap.add_argument("root", help="Path to root/ containing episode_XXXX/")
-    ap.add_argument("--fps", type=int, default=30)
+    ap.add_argument("--fps", type=int, default=15)
     ap.add_argument("--cam-idx", type=int, default=None, help="For singles: only this camera index")
-    ap.add_argument("--cols", type=int, default=5, help="Collage columns")
-    ap.add_argument("--scale", type=float, default=0.25, help="Collage downscale factor")
+    ap.add_argument("--cols", type=int, default=3, help="Collage columns")
+    ap.add_argument("--scale", type=float, default=1.0, help="Collage downscale factor")
     ap.add_argument("--collage", action="store_true", help="Only make collage videos")
     ap.add_argument("--single", action="store_true", help="Only make single videos")
+    ap.add_argument("--eps_idx", type=int, default=None, help="(not used) For singles: only this episode index")
     args = ap.parse_args()
 
     root = Path(args.root).expanduser().resolve()
     assert (args.single or args.collage) and args.single != args.collage, "Please specify --single or --collage"
 
     if args.single:
-        make_single_videos(root, fps=args.fps, cam_idx=args.cam_idx)
+        make_single_videos(root, fps=args.fps, cam_idx=args.cam_idx, eps_idx=args.eps_idx)
 
     if args.collage:
         make_collage_videos(root, fps=args.fps, cols=args.cols, scale=args.scale)
