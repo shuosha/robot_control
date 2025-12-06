@@ -24,14 +24,13 @@ if __name__ == '__main__':
     # cv2.setNumThreads(cv2.getNumberOfCPUs())
     # cv2.namedWindow("real env monitor", cv2.WINDOW_NORMAL)
 
-    mp.set_start_method('spawn')  # type: ignore
-    # torch.multiprocess.set_start_method('spawn')
+    mp.set_start_method("spawn", force=True)
 
     parser = argparse.ArgumentParser()
     parser.add_argument('name', type=str, default='')
     parser.add_argument('--bimanual', action='store_true')
     parser.add_argument('--pusht', action='store_true', default=False)
-    parser.add_argument('--input_mode', type=str, default='gello', choices=["gello", "keyboard"])
+    parser.add_argument('--input_mode', type=str, default='residual_offline', choices=["gello", "keyboard", "residual", "residual_offline"])
     parser.add_argument('--init_pose', type=list, default=[0.0, -45.0, 0.0, 30.0, 0.0, 75.0, 0.0, 0.0])
     parser.add_argument('--robot', type=str, default='xarm7', choices=['xarm7', 'aloha', 'uf850'])
     parser.add_argument('--robot_ip', type=str, default="192.168.1.196")
@@ -46,16 +45,25 @@ if __name__ == '__main__':
     else:
         raise NotImplementedError(f"Robot {args.robot} not supported yet")
 
-    init_poses = [np.array(args.init_pose, dtype=np.float32)]
+    init_poses = [np.array([0.048027075827121735,
+        -0.13141998648643494,
+        0.04114877060055733,
+        0.65958571434021,
+        0.09474538266658783,
+        0.8325322866439819,
+        -0.002133825793862343,
+        0.0024999999441206455], dtype=np.float32)]  # teleop test pose
+    init_poses[0][:7] *= 180.0 / np.pi  # rad to degrees
+    print("Using initial pose: ", init_poses)
 
     env = RobotEnv(
         exp_name=args.name,
-        data_dir="teleop",
+        data_dir="residual_offline",
         debug=True,
 
         resolution=(848, 480),
         capture_fps=30,
-        record_fps=30,
+        record_fps=15,
         perception_process_func=None,
         foundation_pose_dir=args.fp_dir,
 

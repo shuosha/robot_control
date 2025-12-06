@@ -8,6 +8,7 @@ from threadpoolctl import threadpool_limits
 import multiprocess as mp
 import threading
 from threading import Lock
+from typing import Union
 
 from robot_control.utils.utils import get_root
 root: Path = get_root(__file__)
@@ -21,7 +22,7 @@ class Perception(mp.Process):
 
     def __init__(
         self,
-        realsense: MultiRealsense | SingleRealsense, 
+        realsense: Union[MultiRealsense, SingleRealsense], 
         capture_fps, 
         record_fps, 
         record_time, 

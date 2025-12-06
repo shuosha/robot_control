@@ -246,7 +246,7 @@ class XArmRobot:
         else:
             raise ValueError(f"Invalid joint state: {joint_state}, len={len(joint_state)}")
 
-    def set_command(self, joints: np.ndarray, gripper: float | None) -> None:
+    def set_command(self, joints: np.ndarray, gripper: float) -> None:
         with self.target_command_lock:
             self.target_command = {
                 "joints": joints,

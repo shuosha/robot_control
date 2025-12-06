@@ -54,3 +54,14 @@ clone and setup gello
 `python scripts/gello_get_offset.py --start-joints 0 -0.79 0 0.52 0 1.31 0 --joint-signs 1 1 1 1 1 1 1 --port /dev/ttyUSB0`
 
 Change offset, check port, check baudrate, check robot ip
+
+
+
+# for foundation pose 
+
+# build:
+uv pip uninstall setuptools && uv pip install setuptools==69.5.1
+uv pip install torchvision==0.16.0+cu121 torchaudio==2.1.0 torch==2.1.0+cu121 --index-url https://download.pytorch.org/whl/cu121
+
+# pytorch 3d
+uv pip install --quiet --no-index --no-cache-dir pytorch3d -f https://dl.fbaipublicfiles.com/pytorch3d/packaging/wheels/py39_cu118_pyt200/download.html

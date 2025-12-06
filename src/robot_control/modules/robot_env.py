@@ -1,3 +1,4 @@
+from multiprocessing import shared_memory
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="pygame.pkgdata")
 
@@ -36,21 +37,38 @@ import json, glob
 import torch
 from scipy.spatial.transform import Rotation as R
 from pprint import pprint
+from typing import Union
 
 from robot_control.utils.utils import get_root, mkdir
 root: Path = get_root(__file__)
 
 from robot_control.modules.perception import Perception
 from robot_control.modules.xarm_controller import XarmController
+from robot_control.modules.state_estimator import StateEstimator
+from robot_control.utils.udp_util import udpReceiver, udpSender
 
 from robot_control.agents.teleop_keyboard import KeyboardTeleop
 from robot_control.agents.action_commander import ActionAgent
+from robot_control.agents.nn_buffer import NearestNeighborBuffer
 
 from robot_control.utils.kinematics_utils import KinHelper, trans_mat_to_pos_quat, gripper_raw_to_qpos, _quat_apply, _q_mul, _q_normalize
+from robot_control.utils.math import axis_angle_from_quat, quat_mul, quat_conjugate, quat_from_angle_axis, euler_xyz_from_quat, quat_from_euler_xyz, combine_frame_transforms
 
 from robot_control.camera.multi_realsense import MultiRealsense
 from robot_control.camera.single_realsense import SingleRealsense
-from robot_control.utils.pi05_wrapper import PI05Wrapper
+from robot_control.modules.common.communication import RGB_PORT, DEPTH_PORT
+
+import torch
+import sys
+import yaml
+import numpy as np
+from rl_games.algos_torch.players import PpoPlayerContinuous
+# try:
+from gymnasium.spaces import Box
+# except ImportError:
+#     from gym.spaces import Box  # fallback if gymnasium is not installed
+
+# from robot_control.utils.pi05_wrapper import PI05Wrapper
 
 # TODO: import policy inference wrapper
 
@@ -73,19 +91,20 @@ class RobotEnv(mp.Process):
         data_dir: Path = Path("data"),
 
         # --------------------- Cameras ---------------------
-        realsense: MultiRealsense | SingleRealsense | None = None,
-        shm_manager: SharedMemoryManager | None = None,
-        serial_numbers: Sequence[str] | None = None,
+        realsense: Union[MultiRealsense, SingleRealsense, None] = None,
+        shm_manager: Union[SharedMemoryManager, None] = None,
+        serial_numbers: Union[Sequence[str], None] = None,
         resolution: tuple[int, int] = (848, 480),
         capture_fps: int = 30,
-        record_fps: int | None = 0,
-        record_time: float | None = 60 * 10,  # seconds
+        record_fps: Union[int, None] = 0,
+        record_time: Union[float, None] = 60 * 10,  # seconds
         enable_depth: bool = True,
         enable_color: bool = True,
 
         # --------------------- Perception ---------------------
-        perception: Perception | None = None,
-        perception_process_func: Callable | None = None,  # identity if None
+        perception: Union[Perception, None] = None,
+        perception_process_func: Union[Callable, None] = None,  # identity if None
+        foundation_pose_dir: Union[Path, None] = None,
 
         # --------------------- Robot ---------------------
         robot_name: Literal["xarm7", "aloha", "uf850"] = "xarm7",
@@ -98,12 +117,12 @@ class RobotEnv(mp.Process):
         calibrate_result_dir: Path = Path("log/latest_calibration"),
 
         # --------------------- Control ---------------------
-        action_receiver: Literal["gello", "keyboard", "policy", "replay"] = "gello",
+        action_receiver: Literal["gello", "keyboard", "policy", "replay", "residual", "residual_offline"] = "gello",
         action_agent_fps: float = 10.0,
         pusht_mode: bool = False,
-        init_poses: List[np.ndarray] | None = [],
-        action_trajs: np.ndarray | None = None,
-        checkpoint_path: str | None = None,
+        init_poses: Union[List[np.ndarray], None] = [],
+        action_trajs: Union[np.ndarray, None] = None,
+        checkpoint_path: Union[str, None] = None,
     ) -> None:
         """
         Multiprocessing-based robot environment.
@@ -271,6 +290,26 @@ class RobotEnv(mp.Process):
                 self.action_agent = ActionAgent(bimanual=self.bimanual, joint_space_dim=8, action_receiver=action_receiver)
         else:
             raise NotImplementedError(f"Teleop for robot {self.robot_name} is not implemented yet")
+        
+        if foundation_pose_dir is not None:
+            self.state_estimator = StateEstimator(
+                foundation_pose_dir=foundation_pose_dir,
+            )
+            self.policy = self.load_actor_mlp(
+                agent_yaml="logs/policy/v3_gearmesh_3cm_dmr_relaxed_rew/params/agent.yaml",
+                checkpoint_path="logs/policy/v3_gearmesh_3cm_dmr_relaxed_rew/nn/FactoryXarm.pth"
+            )
+
+            self.base_actions_agent = NearestNeighborBuffer(
+                "logs/teleop/20251119_gearmesh_20_processed/debug/robot_trajectories.npz",
+                1,
+                min_horizon=300,
+                max_horizon=300,
+                device="cuda",
+                pad=True,
+            )
+        else:
+            self.state_estimator = None        
 
         # other parameters
         self.state = mp.Manager().dict()  # should be main explict exposed variable to the child class / process
@@ -285,8 +324,8 @@ class RobotEnv(mp.Process):
         num_cams = max(len(self.realsense.serial_numbers),1)
 
         # Image grid: stacked vertically
-        unscaled_width  = img_w * views_per_cam  # 2 * 848 = 1696
-        unscaled_height = img_h * num_cams       # e.g., 480 * 4 = 1920
+        unscaled_width  = 2 * img_w * views_per_cam  # 2 * 848 = 1696
+        unscaled_height = 2 * img_h * num_cams       # e.g., 480 * 4 = 1920
 
         # Get max screen size
         screen_info = pygame.display.Info()
@@ -360,7 +399,8 @@ class RobotEnv(mp.Process):
 
         self.image_display_thread.join()
         self.update_real_state_t.join()
-        print("real env stopped")
+
+        print("======= Real Env Stopped =======")
 
     @property
     def real_alive(self) -> bool:
@@ -547,9 +587,9 @@ class RobotEnv(mp.Process):
             time.sleep(1)
             print("Initial pose set")
 
-            if self.action_receiver == "replay" or self.action_receiver == "policy":
+            if self.action_receiver == "replay" or self.action_receiver == "policy" or self.action_receiver == "residual_offline":
                 self.action_agent.record_start.value = True
-            elif self.action_receiver == "keyboard" or self.action_receiver == "gello":
+            elif self.action_receiver == "keyboard" or self.action_receiver == "gello" or self.action_receiver == "residual":
                 self.xarm_controller.teleop_activated.value = False
 
     def store_robot_data(self, trans_out, qpos_out, gripper_out, action_qpos_out, action_trans_out, action_gripper_out, robot_obs_record_dir, robot_action_record_dir, force_out=None) -> None:
@@ -647,12 +687,151 @@ class RobotEnv(mp.Process):
 
         return env_obs
 
+    def load_actor_mlp(self,
+        agent_yaml: str,
+        checkpoint_path: str,
+    ) -> torch.nn.Module:
+        with open(agent_yaml, "r") as f:
+            agent_cfg = yaml.safe_load(f)
+        agent_cfg["params"]["load_checkpoint"] = True
+        agent_cfg["params"]["resume_path"] = checkpoint_path
+        agent_cfg["params"]["config"]["env_info"] = {
+            "observation_space": Box(-np.inf, np.inf, (35,), dtype=np.float32),
+            "action_space": Box(-1.0, 1.0, (7,), dtype=np.float32),
+            "agents": 1,
+            "value_size": 1,
+        }
+
+        policy = PpoPlayerContinuous(agent_cfg["params"])
+        policy.restore(checkpoint_path)
+        policy.reset()
+
+        return policy
+    
+    def get_residual_observations(self, trans_out, gripper_out, dt,
+                                held_pos, fixed_pos, 
+                                action_trans_out, action_gripper_out,
+                                device='cuda', offline=True):
+        curr_pos, fingertip_quat = trans_mat_to_pos_quat(trans_out["value"])
+        gripper = gripper_raw_to_qpos(gripper_out["value"][0])
+        eef_pos = torch.from_numpy(curr_pos).unsqueeze(0).to(device).to(torch.float32)
+        fingertip_quat = torch.from_numpy(fingertip_quat).unsqueeze(0).to(device).to(torch.float32)
+        fingertip_pos = combine_frame_transforms(
+            eef_pos,
+            fingertip_quat,
+            torch.tensor([[0.0, 0.0, 0.23]], dtype=torch.float32).to(device),
+            torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32).to(device),
+        )[0]
+
+        gripper = torch.tensor([gripper], dtype=torch.float32).unsqueeze(0).to(device)
+
+        fixed_pos = torch.from_numpy(fixed_pos).unsqueeze(0).to(device).to(torch.float32)
+        held_pos = torch.from_numpy(held_pos).unsqueeze(0).to(device).to(torch.float32)
+
+        fingertip_pos_rel_fixed = fingertip_pos - fixed_pos  # (1,3)
+        fingertip_pos_rel_held = fingertip_pos - held_pos # (1,3)
+
+        if self.prev_fingertip_pos is None:
+            ee_linvel_fd = torch.zeros((1,3), dtype=torch.float32).to(device)
+            ee_angvel_fd = torch.zeros((1,3), dtype=torch.float32).to(device)
+        else:
+            ee_linvel_fd = (fingertip_pos - self.prev_fingertip_pos) / dt  # (1,3)
+            rot_diff_quat = quat_mul(fingertip_quat, quat_conjugate(self.prev_fingertip_quat))
+            rot_diff_quat *= torch.sign(rot_diff_quat[:, 0]).unsqueeze(-1)  # ensure shortest path
+            rot_diff_aa = axis_angle_from_quat(rot_diff_quat)
+            ee_angvel_fd = rot_diff_aa / dt  # (1,3)
+
+        self.prev_fingertip_pos = fingertip_pos
+        self.prev_fingertip_quat = fingertip_quat
+
+        if offline:
+            eps_idx = torch.tensor([0], dtype=torch.int64).to(device)
+            base_actions = self.base_actions_agent.get_actions(eps_idx, eef_pos, fingertip_quat, gripper)
+            base_actions[:, :3] = combine_frame_transforms(
+                base_actions[:, :3],
+                base_actions[:, 3:7],
+                torch.tensor([[0.0, 0.0, 0.23]], dtype=torch.float32).to(device),
+                torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32).to(device),
+            )[0]
+
+        else:
+            base_pos, base_quat = trans_mat_to_pos_quat(action_trans_out["value"])
+            base_gripper = action_gripper_out["value"][0] # NOTE: processed gripper from action commander
+            base_pos = torch.from_numpy(base_pos).unsqueeze(0).to(device).to(torch.float32)
+            base_quat = torch.from_numpy(base_quat).unsqueeze(0).to(device).to(torch.float32)
+            base_gripper = torch.tensor([base_gripper], dtype=torch.float32).unsqueeze(0).to(device)
+            base_actions = torch.cat([base_pos, base_quat, base_gripper], dim=-1)  # (1,8)
+            base_actions[:, :3] = combine_frame_transforms(
+                base_actions[:, :3],
+                base_actions[:, 3:7],
+                torch.tensor([[0.0, 0.0, 0.23]], dtype=torch.float32).to(device),
+                torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32).to(device),
+            )[0]
+
+        obs = torch.cat([
+            fingertip_pos, fingertip_quat, gripper * 1.6,
+            fingertip_pos_rel_fixed,
+            fingertip_pos_rel_held,
+            ee_linvel_fd, ee_angvel_fd,
+            base_actions,
+            self.prev_actions
+        ], dim=-1).to(torch.float32)  # (1,35)
+
+        return obs
+
+    def apply_residual(self, residual, base_actions, qpos, device='cuda'):
+        pos_actions = residual[:, 0:3] * torch.tensor([[0.03, 0.03, 0.03]], dtype=torch.float32).to(device)  # (1,3)
+        rot_actions = residual[:, 3:6] * torch.tensor([[0.097, 0.097, 0.097]], dtype=torch.float32).to(device)  # (1,3)
+
+        target_pos = base_actions[:, 0:3] + pos_actions  # (1,3)
+
+        angle = torch.norm(rot_actions, p=2, dim=-1)
+        axis = rot_actions / angle.unsqueeze(-1)  # (1,3)
+        rot_actions_quat = quat_from_angle_axis(angle, axis)  # (1,4)
+        rot_actions_quat = torch.where(
+            angle.unsqueeze(-1).repeat(1, 4) > 1e-6,
+            rot_actions_quat,
+            torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=torch.float32).unsqueeze(0).to(device)
+        )
+        target_quat = quat_mul(rot_actions_quat, base_actions[:, 3:7])  # (1,4)
+
+        euler_xyz = torch.stack(euler_xyz_from_quat(target_quat), dim =1)
+        euler_xyz[:, 0] = 3.14159
+        euler_xyz[:, 1] = 0.0
+        target_quat = quat_from_euler_xyz(
+            roll=euler_xyz[:, 0],
+            pitch=euler_xyz[:, 1],
+            yaw=euler_xyz[:, 2]
+        )
+
+        target_gripper = torch.clamp(base_actions[:, 7:8], 0.0, 1.0)  # (1,1)
+        # target_gripper = torch.clamp(base_actions[:, 7:8] + residual[:, 6:7], 0.0, 1.0)  # (1,1)
+
+        actions_fingertip = torch.cat([target_pos, target_quat, target_gripper], dim=-1)  # (1,8)
+        goal_fingertip_pos = actions_fingertip[:, :3].clone()
+        actions_eef = actions_fingertip.clone()
+        actions_eef[:, :3] = combine_frame_transforms(
+            actions_eef[:, :3],
+            actions_eef[:, 3:7],
+            torch.tensor([[0.0, 0.0, -0.23]], dtype=torch.float32).to(device),
+            torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32).to(device),
+        )[0]
+        actions_eef = actions_eef.squeeze(0).cpu().numpy()
+        print("actions_eef: ", actions_eef)
+
+        target_qpos = self.get_qpos_from_action_8d(actions_eef, curr_qpos=qpos)
+        
+        return target_qpos, goal_fingertip_pos
+
     def run(self) -> None:
         robot_obs_record_dir = root / "logs" / self.data_dir / self.exp_name / "robot_obs"
         os.makedirs(robot_obs_record_dir, exist_ok=True)
 
         robot_action_record_dir = root / "logs" / self.data_dir / self.exp_name / "robot_action"
         os.makedirs(robot_action_record_dir, exist_ok=True)
+
+        env_obs_record_dir = root / "logs" / self.data_dir / self.exp_name / "env_obs"
+        os.makedirs(env_obs_record_dir, exist_ok=True)
 
         # initialize kinematics helper
         self.kin_helper = KinHelper(robot_name='xarm7')
@@ -670,8 +849,9 @@ class RobotEnv(mp.Process):
         timestep = 0
         eps_idx = 0
         new_eps = False
+        obj_poses = {}
 
-        if self.action_receiver == "replay" or self.action_receiver == "policy":
+        if self.action_receiver == "replay" or self.action_receiver == "policy" or self.action_receiver == "residual_offline":
             if len(self.init_poses) == 1:
                 init_pose = self.init_poses[0]
             else:
@@ -681,6 +861,13 @@ class RobotEnv(mp.Process):
 
             if self.action_receiver == "replay":
                 total_timesteps = self.action_trajs[eps_idx].shape[0]
+
+        self.prev_fingertip_pos = None
+        self.prev_fingertip_quat = None
+        get_obs_time = None
+        residual = torch.zeros((1,7), dtype=torch.float32, device='cuda')
+
+        obs_buf = []
 
         while self.alive:
             try:
@@ -705,16 +892,37 @@ class RobotEnv(mp.Process):
                 gripper_out = state.get("gripper_out", None)
                 force_out = state.get("force_out", None)
 
+                # action data
+                action_qpos_out = state.get("action_qpos_out", None)
+                action_trans_out = state.get("action_trans_out", None)
+                action_gripper_out = state.get("action_gripper_out", None)
+
+                # obj state data
                 if perception_out is not None:
                     for k, v in perception_out['value'].items():
                         rgbs[k] = v["color"]
                         depths[k] = v["depth"]
 
+                    obj_poses = self.state_estimator.estimate_object_poses( # obj2cam
+                        rgbs[0],
+                        depths[0],
+                        retrack=self.action_agent.track_obj.value
+                    )
+                    if self.action_agent.track_obj.value:
+                        self.action_agent.track_obj.value = False
+
+                held2base = self.state_estimator.cam2base @ obj_poses[0]
+                held_pos = held2base[:3, 3]  # obj_poses[0, :3, 3]
+                fixed_pos = np.array([0.384, -0.096, 0.025]) #obj_poses[1, :3, 3]
+
+                # reset robot to initial pose if "r" is pressed
                 if self.action_agent.reset.value:
                     timestep = 0 
                     if not new_eps: # restarting at 
                         eps_idx += 1
                         new_eps = True
+
+                        # replay terminates after all eps are done
                         if self.action_receiver == "replay":
                             if self.total_trajs <= eps_idx:
                                 print("All trajectories replayed, stopping environment")
@@ -729,20 +937,49 @@ class RobotEnv(mp.Process):
                 # after pressing 's' to start
                 elif not self.action_agent.reset.value:
                     new_eps = False
-                    if self.action_receiver == "policy":
-                        env_obs = self._read_env_obs(rgbs, depths, trans_out, qpos_out, gripper_out)
+                    if self.action_receiver == "residual" or self.action_receiver == "residual_offline":
+                        if get_obs_time is None:
+                            dt = 1/15
+                        else:
+                            prev_get_obs_time = get_obs_time
+                            get_obs_time = time.time()
+                            dt = get_obs_time - prev_get_obs_time
+                            print("dt: ", dt)
 
-                        # ---------- inspect env_obs ------------
-                        # for k, v in env_obs.items():
-                        #     if isinstance(v, list):
-                        #         for i in range(len(v)):
-                        #             print("shape", f"{k}[{i}]", np.array(v[i]).shape)
-                        #             print("dtype", f"{k}[{i}]", np.array(v[i]).dtype)
-                        #     elif isinstance(v, np.ndarray):
-                        #         print("shape", k, np.array(v).shape)
-                        #         print("dtype", k, np.array(v).dtype) 
-                        #     else:
-                        #         print("type", k, type(v))
+                        self.prev_actions = residual
+                        obs = self.get_residual_observations(trans_out, gripper_out, dt,
+                                                             held_pos, fixed_pos, 
+                                                             action_trans_out, action_gripper_out,
+                                                             offline=False) # tensor (1, 35)
+                        obs_buf.append(obs)
+
+                        fingertip_pos = obs[0, 0:3].cpu().numpy()
+                        base_pos = obs[0, -15:-12].cpu().numpy()
+                    
+                        print("obs: ", obs)
+                        residual = self.policy.get_action(obs, is_deterministic=True) # tensor (1,7)
+                        print("residual: ", residual)
+                        # pre physics step
+                        residual = residual * 0.2 + self.prev_actions * 0.8  # smooth residual
+                        # apply actions
+                        print("base actions:", obs[:, -15:-7])  # tensor (1,8)
+                        actions, final_pos = self.apply_residual(residual, obs[:, -15:-7], qpos_out["value"])  # np (8,)
+                        final_pos = final_pos[0].cpu().numpy()
+                        if self.action_receiver == "residual_offline":
+                            self.action_agent.command[:] = actions
+                            timestep += 1
+                            print(f"timestep: {timestep}")
+                            if timestep >= 300:
+                                print(f"Episode {eps_idx} finished after {timestep} timesteps")
+                                self.perception.set_record_stop()
+                                torch.save(obs_buf, env_obs_record_dir / f"env_obs_eps_{eps_idx}_real.pt")
+                                break
+
+                        else:
+                            self.action_agent.command_with_residual[:] = actions # np (8,)
+
+                    elif self.action_receiver == "policy":
+                        env_obs = self._read_env_obs(rgbs, depths, trans_out, qpos_out, gripper_out)
 
                         action = self.policy.get_action(env_obs)
                         print("current qpos:", qpos_out["value"])
@@ -763,16 +1000,11 @@ class RobotEnv(mp.Process):
                             self.perception.set_record_stop()
                             self.action_agent.reset.value = True
 
-                # action data
-                action_qpos_out = state.get("action_qpos_out", None)
-                action_trans_out = state.get("action_trans_out", None)
-                action_gripper_out = state.get("action_gripper_out", None)
-
                 intrinsics = self.get_intrinsics()
 
                 # TODO: compare with prev. code and debug why store data not working, mostly likely changes storing location to get_command() in action_agent?
                 # store state and action data
-                if trans_out is not None:
+                if trans_out is not None and action_qpos_out is not None:
                     self.store_robot_data(
                         trans_out,
                         qpos_out,
@@ -788,9 +1020,31 @@ class RobotEnv(mp.Process):
                 # Build raw full RGB+depth image (original behavior)
                 row_imgs = []
                 for row in range(len(self.realsense.serial_numbers)):
+                    if self.state_estimator is not None and row == 0:
+                        try:
+                            for idx in range(obj_poses.shape[0]):
+                                rgbs[row] = self.state_estimator.draw_detected_objects(
+                                    rgbs[row],
+                                    obj_poses[idx],
+                                )
+                        except BaseException as e:
+                            print(f"Error in drawing detected objects")
+                            pass
+
+                        try: 
+                            rgbs[row] = self.state_estimator.draw_triangle_from_base_points(
+                                rgbs[row],
+                                fingertip_pos,
+                                base_pos,
+                                final_pos
+                            )
+                        except BaseException as e:
+                            print(f"Error in drawing triangle: {e.with_traceback()}")
+                            pass
+
                     rgb = cv2.cvtColor(rgbs[row], cv2.COLOR_BGR2RGB)
                     depth = cv2.applyColorMap(cv2.convertScaleAbs(depths[row], alpha=0.03), cv2.COLORMAP_JET)
-                    row_imgs.append(np.hstack((rgb, depth)))
+                    row_imgs.append(np.hstack((rgb, depth)))                
                 combined_img = np.vstack(row_imgs)
 
                 # Resize to fit window resolution set during init

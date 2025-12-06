@@ -35,7 +35,7 @@ class ActionAgent(mp.Process):
         self, 
         bimanual=False,
         joint_space_dim=8,
-        action_receiver: Literal["gello", "keyboard", "policy", "replay"]="gello",
+        action_receiver: Literal["gello", "keyboard", "policy", "replay", "residual", "residual_offline"] = "gello",
     ) -> None:
 
         """
@@ -71,11 +71,15 @@ class ActionAgent(mp.Process):
             "/": False,
             "r": False,
             "s": False,
+            "a": False,
+            "t": False
         }
 
         # additional states
         self.init = True
         self.pause = False
+        self.use_residual = False
+        self.track_obj = mp.Value('b', False)
         self.reset = mp.Value('b', False)
         self.record_start = mp.Value('b', False)
         self.record_stop = mp.Value('b', False)
@@ -96,6 +100,8 @@ class ActionAgent(mp.Process):
             self.command = mp.Array('d', [0.0] * 8)   # NOTE: always 8d for this gello setup
             self.cur_qpos_comm = mp.Array('d', [0.0] * 8) 
             self.cur_eef_trans = mp.Array('d', [0.0] * 16)  # 4x4 matrix
+
+        self.command_with_residual = mp.Array('d', [0.0] * 8)
         self.cur_time_q = mp.Value('d', 0.0)
 
         self._alive = mp.Value('b', True)
@@ -135,6 +141,16 @@ class ActionAgent(mp.Process):
             # abandon all other keyinputs
             self.pause = not self.pause
             self.log(f"teleop pause status: {self.pause}")
+            time.sleep(0.5)
+
+        if self.key_states["t"]:
+            self.track_obj.value = True
+            self.log(f"retrack objects: {self.track_obj.value}")
+            time.sleep(0.5)
+        
+        if self.key_states["a"]:
+            self.use_residual = not self.use_residual
+            self.log(f"teleop residual usage status: {self.use_residual}")
             time.sleep(0.5)
 
         if self.key_states[","]:
@@ -185,7 +201,7 @@ class ActionAgent(mp.Process):
             return
 
     def run(self) -> None:
-        if self.action_receiver == "gello":
+        if self.action_receiver == "gello" or self.action_receiver == "residual":
             gello_port = '/dev/ttyUSB0'
             baudrate = 57600
             self.gello_listener = GelloListener(
@@ -196,7 +212,7 @@ class ActionAgent(mp.Process):
             )
             self.log(f"initializing dynamixel gello listener with port: {gello_port} and baudrate: {baudrate}")
             self.gello_listener.start()
-        elif self.action_receiver == "policy" or self.action_receiver == "replay":
+        elif self.action_receiver == "policy" or self.action_receiver == "replay" or self.action_receiver == "residual_offline":
             # currently directly overwriting command in main process
             pass
         elif self.action_receiver == "keyboard":
@@ -233,6 +249,13 @@ class ActionAgent(mp.Process):
                         # self.log(f"keyboard robot reset: {self.reset.value}")
                         self.record_start.value = True
 
+                    command = list(self.command)
+
+                if self.action_receiver == "residual":
+                    if self.use_residual:
+                        command = list(self.command_with_residual)
+
+                if self.action_receiver == "residual_offline":
                     command = list(self.command)
 
                 command_np = np.array(self.command[:])

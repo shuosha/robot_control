@@ -11,7 +11,7 @@ class TransparentImageViewer(QWidget):
         self.setWindowOpacity(0.7)
 
         self.image_folder = image_folder
-        self.image_files = sorted([f for f in os.listdir(image_folder) if f.endswith(".jpg")])
+        self.image_files = sorted([f for f in os.listdir(image_folder) if f.endswith((".jpg", ".jpeg", ".png"))])
         self.index = 0
 
         self.label = QLabel(self)

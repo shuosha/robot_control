@@ -28,10 +28,6 @@ from robot_control.modules.common.xarm import *
 
 np.set_printoptions(precision=2, suppress=True)
 
-@staticmethod
-def interpolate(a, b, alpha):  # linear in joint space
-    return a + alpha * (b - a)
-
 class Rate:
     def __init__(self, *, duration):
         self.duration = duration
@@ -84,6 +80,9 @@ class XarmController(mp.Process):
     def log(self, msg):
         if self.verbose:
             self.pprint(msg)
+            
+    def interpolate(self, a, b, alpha):  # linear in joint space
+        return a + alpha * (b - a)
     
     @staticmethod
     def pprint(*args, **kwargs):
@@ -337,7 +336,7 @@ class XarmController(mp.Process):
         if self.admittance_control:
             assert self.control_mode != "velocity_control", "admittance control is not compatible with velocity control mode"
             # set tool admittance parameters:
-            K_pos = 1000       #  x/y/z linear stiffness coefficient, range: 0 ~ 2000 (N/m)
+            K_pos = 1500       #  x/y/z linear stiffness coefficient, range: 0 ~ 2000 (N/m)
             K_ori = 4           #  Rx/Ry/Rz rotational stiffness coefficient, range: 0 ~ 20 (Nm/rad)
 
             # Attention: for M and J, smaller value means less effort to drive the arm, but may also be less stable, please be careful. 
@@ -550,7 +549,7 @@ class XarmController(mp.Process):
                             inner_t = time.time()
                             alpha = np.clip((inner_t - outer_start) * self.comm_update_fps, 0, 1)
 
-                            interp_next_state = interpolate(curr_arm_state, next_arm_state, alpha)
+                            interp_next_state = self.interpolate(curr_arm_state, next_arm_state, alpha)
 
                             # communicate to low-level control
                             if self.control_mode == 'position_control':
