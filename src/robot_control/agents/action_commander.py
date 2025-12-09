@@ -24,7 +24,7 @@ from third_party.gello.zmq_core.robot_node import ZMQClientRobot
 from third_party.gello.agents.gello_agent import DynamixelRobotConfig
 from third_party.gello.dynamixel.driver import DynamixelDriver
 
-np.set_printoptions(precision=2, suppress=True)
+# np.set_printoptions(precision=2, suppress=True)
 
 class ActionAgent(mp.Process):
 
@@ -78,7 +78,7 @@ class ActionAgent(mp.Process):
         # additional states
         self.init = True
         self.pause = False
-        self.use_residual = False
+        self.use_residual = mp.Value('b', False)
         self.track_obj = mp.Value('b', False)
         self.reset = mp.Value('b', False)
         self.record_start = mp.Value('b', False)
@@ -136,6 +136,37 @@ class ActionAgent(mp.Process):
             if key == keyboard.Key.esc:
                 return False
 
+    def enforce_z_down(self, fk: np.ndarray) -> np.ndarray:
+        """Modify fk so that its orientation has z-axis pointing down,
+        but keeps the closest possible yaw to the original orientation."""
+        fk = fk.copy()
+        R = fk[:3, :3]
+
+        # Desired z axis in base frame (pointing down)
+        z_axis = np.array([0.0, 0.0, -1.0])
+
+        # Take current x-axis of the EE in base frame
+        x_curr = R[:, 0]
+
+        # Project x_curr onto plane orthogonal to z_axis
+        x_proj = x_curr - np.dot(x_curr, z_axis) * z_axis
+        norm = np.linalg.norm(x_proj)
+        if norm < 1e-6:
+            # If projection is degenerate, fall back to a default horizontal axis
+            x_axis = np.array([1.0, 0.0, 0.0])
+        else:
+            x_axis = x_proj / norm
+
+        # y = z × x to complete right-handed frame
+        y_axis = np.cross(z_axis, x_axis)
+
+        # Orthonormalize y just in case
+        y_axis /= np.linalg.norm(y_axis)
+
+        R_new = np.column_stack([x_axis, y_axis, z_axis])
+        fk[:3, :3] = R_new
+        return fk
+
     def get_command(self):        
         if self.key_states["p"]:
             # abandon all other keyinputs
@@ -149,8 +180,8 @@ class ActionAgent(mp.Process):
             time.sleep(0.5)
         
         if self.key_states["a"]:
-            self.use_residual = not self.use_residual
-            self.log(f"teleop residual usage status: {self.use_residual}")
+            self.use_residual.value = not self.use_residual.value
+            self.log(f"teleop residual usage status: {self.use_residual.value}")
             time.sleep(0.5)
 
         if self.key_states[","]:
@@ -194,8 +225,15 @@ class ActionAgent(mp.Process):
                 next_joints = self.kin_helper.compute_ik_sapien(command_joints[:7], cur_xyzrpy, verbose=False).tolist()
 
             else:
+                fk = self.kin_helper.compute_fk_sapien_links(command_joints[:7], [self.kin_helper.sapien_eef_idx])[0]
+                fk = self.enforce_z_down(fk)
+                cur_xyzrpy = np.zeros(6)
+                cur_xyzrpy[:3] = fk[:3, 3]
+                cur_xyzrpy[3:] = transforms3d.euler.mat2euler(fk[:3, :3])
+                next_joints = self.kin_helper.compute_ik_sapien(command_joints[:7], cur_xyzrpy, verbose=False).tolist()
+                next_joints += [command_joints[7]]  # gripper
                 # direct joint mapping
-                next_joints = command_joints.tolist()
+                # next_joints = command_joints.tolist()
                 
             self.command[:] = next_joints
             return
@@ -252,7 +290,7 @@ class ActionAgent(mp.Process):
                     command = list(self.command)
 
                 if self.action_receiver == "residual":
-                    if self.use_residual:
+                    if self.use_residual.value:
                         command = list(self.command_with_residual)
 
                 if self.action_receiver == "residual_offline":

@@ -56,7 +56,6 @@ from robot_control.utils.math import axis_angle_from_quat, quat_mul, quat_conjug
 
 from robot_control.camera.multi_realsense import MultiRealsense
 from robot_control.camera.single_realsense import SingleRealsense
-from robot_control.modules.common.communication import RGB_PORT, DEPTH_PORT
 
 import torch
 import sys
@@ -296,8 +295,8 @@ class RobotEnv(mp.Process):
                 foundation_pose_dir=foundation_pose_dir,
             )
             self.policy = self.load_actor_mlp(
-                agent_yaml="logs/policy/v3_gearmesh_3cm_dmr_relaxed_rew/params/agent.yaml",
-                checkpoint_path="logs/policy/v3_gearmesh_3cm_dmr_relaxed_rew/nn/FactoryXarm.pth"
+                agent_yaml="logs/policy/2025-12-05_21-57-59_gearmesh_dmr_controller_noise_obj_obs/params/agent.yaml",
+                checkpoint_path="logs/policy/2025-12-05_21-57-59_gearmesh_dmr_controller_noise_obj_obs/nn/FactoryXarm.pth"
             )
 
             self.base_actions_agent = NearestNeighborBuffer(
@@ -734,12 +733,19 @@ class RobotEnv(mp.Process):
         if self.prev_fingertip_pos is None:
             ee_linvel_fd = torch.zeros((1,3), dtype=torch.float32).to(device)
             ee_angvel_fd = torch.zeros((1,3), dtype=torch.float32).to(device)
+            self.last_linvel = ee_linvel_fd.clone()
+            self.last_angvel = ee_angvel_fd.clone()
         else:
             ee_linvel_fd = (fingertip_pos - self.prev_fingertip_pos) / dt  # (1,3)
             rot_diff_quat = quat_mul(fingertip_quat, quat_conjugate(self.prev_fingertip_quat))
             rot_diff_quat *= torch.sign(rot_diff_quat[:, 0]).unsqueeze(-1)  # ensure shortest path
             rot_diff_aa = axis_angle_from_quat(rot_diff_quat)
             ee_angvel_fd = rot_diff_aa / dt  # (1,3)
+
+            ee_linvel_fd = 0.5 * self.last_linvel + 0.5 * ee_linvel_fd
+            ee_angvel_fd = 0.5 * self.last_angvel + 0.5 * ee_angvel_fd
+            self.last_linvel = ee_linvel_fd.clone()
+            self.last_angvel = ee_angvel_fd.clone()
 
         self.prev_fingertip_pos = fingertip_pos
         self.prev_fingertip_quat = fingertip_quat
@@ -755,21 +761,31 @@ class RobotEnv(mp.Process):
             )[0]
 
         else:
-            base_pos, base_quat = trans_mat_to_pos_quat(action_trans_out["value"])
-            base_gripper = action_gripper_out["value"][0] # NOTE: processed gripper from action commander
-            base_pos = torch.from_numpy(base_pos).unsqueeze(0).to(device).to(torch.float32)
-            base_quat = torch.from_numpy(base_quat).unsqueeze(0).to(device).to(torch.float32)
-            base_gripper = torch.tensor([base_gripper], dtype=torch.float32).unsqueeze(0).to(device)
-            base_actions = torch.cat([base_pos, base_quat, base_gripper], dim=-1)  # (1,8)
-            base_actions[:, :3] = combine_frame_transforms(
-                base_actions[:, :3],
-                base_actions[:, 3:7],
+            gello_pos, gello_quat = trans_mat_to_pos_quat(action_trans_out["value"])
+            gello_gripper = action_gripper_out["value"][0] # NOTE: processed gripper from action commander
+            gello_pos = torch.from_numpy(gello_pos).unsqueeze(0).to(device).to(torch.float32)
+            gello_quat = torch.from_numpy(gello_quat).unsqueeze(0).to(device).to(torch.float32)
+            gello_gripper = torch.tensor([gello_gripper], dtype=torch.float32).unsqueeze(0).to(device)
+            gello_actions = torch.cat([gello_pos, gello_quat, gello_gripper], dim=-1)  # (1,8)
+            gello_actions[:, :3] = combine_frame_transforms(
+                gello_actions[:, :3],
+                gello_actions[:, 3:7],
                 torch.tensor([[0.0, 0.0, 0.23]], dtype=torch.float32).to(device),
                 torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32).to(device),
             )[0]
 
+            base_actions = gello_actions.clone()
+
+            last_gello = gello_actions[:, :3].clone()
+            if self.last_gello_pos is not None:
+                base_actions[:, :3] = (gello_actions[:, :3] - self.last_gello_pos) + fingertip_pos
+            self.last_gello_pos = last_gello
+
+            # self.real_base = base_actions.clone()
+            # self.real_base[:, :3] = self.last_base_pos
+
         obs = torch.cat([
-            fingertip_pos, fingertip_quat, gripper * 1.6,
+            fingertip_pos, fingertip_quat, gripper,
             fingertip_pos_rel_fixed,
             fingertip_pos_rel_held,
             ee_linvel_fd, ee_angvel_fd,
@@ -808,6 +824,10 @@ class RobotEnv(mp.Process):
         # target_gripper = torch.clamp(base_actions[:, 7:8] + residual[:, 6:7], 0.0, 1.0)  # (1,1)
 
         actions_fingertip = torch.cat([target_pos, target_quat, target_gripper], dim=-1)  # (1,8)
+
+        delta = torch.clamp(actions_fingertip[:,:3] - self.last_gello_pos, min=-0.03, max=0.03)  # (1,8)
+        actions_fingertip[:,:3] = self.last_gello_pos + delta  # (1,8)
+
         goal_fingertip_pos = actions_fingertip[:, :3].clone()
         actions_eef = actions_fingertip.clone()
         actions_eef[:, :3] = combine_frame_transforms(
@@ -817,7 +837,6 @@ class RobotEnv(mp.Process):
             torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32).to(device),
         )[0]
         actions_eef = actions_eef.squeeze(0).cpu().numpy()
-        print("actions_eef: ", actions_eef)
 
         target_qpos = self.get_qpos_from_action_8d(actions_eef, curr_qpos=qpos)
         
@@ -864,10 +883,13 @@ class RobotEnv(mp.Process):
 
         self.prev_fingertip_pos = None
         self.prev_fingertip_quat = None
+        self.last_gello_pos = None
         get_obs_time = None
         residual = torch.zeros((1,7), dtype=torch.float32, device='cuda')
 
         obs_buf = []
+
+        time.sleep(1)
 
         while self.alive:
             try:
@@ -954,15 +976,16 @@ class RobotEnv(mp.Process):
                         obs_buf.append(obs)
 
                         fingertip_pos = obs[0, 0:3].cpu().numpy()
+
                         base_pos = obs[0, -15:-12].cpu().numpy()
-                    
-                        print("obs: ", obs)
+
+                        # print("obs: ", obs)
                         residual = self.policy.get_action(obs, is_deterministic=True) # tensor (1,7)
-                        print("residual: ", residual)
+                        # print("residual: ", residual)
                         # pre physics step
                         residual = residual * 0.2 + self.prev_actions * 0.8  # smooth residual
                         # apply actions
-                        print("base actions:", obs[:, -15:-7])  # tensor (1,8)
+                        # print("base actions:", obs[:, -15:-7])  # tensor (1,8)
                         actions, final_pos = self.apply_residual(residual, obs[:, -15:-7], qpos_out["value"])  # np (8,)
                         final_pos = final_pos[0].cpu().numpy()
                         if self.action_receiver == "residual_offline":
@@ -1036,11 +1059,23 @@ class RobotEnv(mp.Process):
                                 rgbs[row],
                                 fingertip_pos,
                                 base_pos,
-                                final_pos
+                                final_pos,
                             )
+
+                            if self.last_gello_pos is not None:
+                                rgbs[row] = self.state_estimator.project_points_on_image(
+                                    rgbs[row],
+                                    self.last_gello_pos.cpu().numpy(), # (1,3)
+                                )
                         except BaseException as e:
                             print(f"Error in drawing triangle: {e.with_traceback()}")
                             pass
+
+                        if self.action_agent.use_residual.value:
+                            text = f"Residual ON"
+                        else:
+                            text = f"Residual OFF"
+                        cv2.putText(rgbs[row], text, (10,30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0,255,0), 2)
 
                     rgb = cv2.cvtColor(rgbs[row], cv2.COLOR_BGR2RGB)
                     depth = cv2.applyColorMap(cv2.convertScaleAbs(depths[row], alpha=0.03), cv2.COLORMAP_JET)
