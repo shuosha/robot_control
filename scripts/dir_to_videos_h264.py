@@ -44,10 +44,17 @@ def _list_cameras(ep_dir: Path) -> List[int]:
 def _bgr_to_rgb(img: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
+def _crop(img: np.ndarray, crop: Optional[Tuple[int, int, int, int]]) -> np.ndarray:
+    if crop is None:
+        return img
+    y0, y1, x0, x1 = crop
+    return img[y0:y1, x0:x1]
+
 # --------------------- 1) single videos (H.264) ---------------------
 
 def make_single_videos(root: Path, fps: int = 30, cam_idx: Optional[int] = None,
-                       pattern: str = "*.jpg", eps_idx: Optional[int] = None) -> List[Tuple[int, Path]]:
+                       pattern: str = "*.jpg", eps_idx: Optional[int] = None,
+                       crop: Optional[Tuple[int, int, int, int]] = None) -> List[Tuple[int, Path]]:
     """
     Create H.264 per-episode videos:
       videos/eps_{04d}_cam_{idx}.mp4
@@ -96,6 +103,9 @@ def make_single_videos(root: Path, fps: int = 30, cam_idx: Optional[int] = None,
             if first is None:
                 continue
             H, W = first.shape[:2]
+            if first.shape[:2] != (H, W):
+                first = cv2.resize(first, (W, H), interpolation=cv2.INTER_AREA)
+            first = _crop(first, crop)
 
             def frames() -> Iterable[np.ndarray]:
                 for p in jpgs:
@@ -104,6 +114,7 @@ def make_single_videos(root: Path, fps: int = 30, cam_idx: Optional[int] = None,
                         continue
                     if img.shape[:2] != (H, W):
                         img = cv2.resize(img, (W, H), interpolation=cv2.INTER_AREA)
+                    img = _crop(img, crop)
                     yield _bgr_to_rgb(img)
 
             # H.264 + yuv420p for Windows/macOS preview compatibility
@@ -124,7 +135,8 @@ def make_single_videos(root: Path, fps: int = 30, cam_idx: Optional[int] = None,
 # --------- 2) collage videos (on-the-fly from JPGs, with scale) ---------
 
 def make_collage_videos(root: Path, fps: int = 30, cols: int = 7,
-                        scale: float = 0.25, pattern: str = "*.jpg") -> None:
+                        scale: float = 0.25, pattern: str = "*.jpg",
+                        crop: Optional[Tuple[int, int, int, int]] = None) -> None:
     """
     For each camera index:
       - Gather episodes with camera_{idx}/rgb/*.jpg
@@ -166,18 +178,39 @@ def make_collage_videos(root: Path, fps: int = 30, cols: int = 7,
 
         # Determine cell size from the first readable frame
         first_frame = None
+        H0 = W0 = None
+
         for lst in ep_jpgs:
-            f0 = cv2.imread(str(lst[0]))
-            if f0 is not None:
-                if scale != 1.0:
-                    f0 = cv2.resize(f0, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
-                first_frame = _bgr_to_rgb(f0)
-                break
+            f0_full = cv2.imread(str(lst[0]))
+            if f0_full is None:
+                continue
+
+            # original full-res size
+            H0, W0 = f0_full.shape[:2]
+
+            # 1) crop
+            if crop is not None:
+                y0, y1, x0, x1 = crop
+                f0 = f0_full[y0:y1, x0:x1]
+            else:
+                f0 = f0_full
+
+            # 2) resize back to original proportions (full size)
+            f0 = cv2.resize(f0, (W0, H0), interpolation=cv2.INTER_AREA)
+
+            # 3) final scale for collage
+            if scale != 1.0:
+                f0 = cv2.resize(f0, (0, 0), fx=scale, fy=scale,
+                                interpolation=cv2.INTER_AREA)
+
+            first_frame = _bgr_to_rgb(f0)
+            break
+
         if first_frame is None:
             print(f"[skip] camera {c}: no readable frames")
             continue
 
-        H, W = first_frame.shape[:2]
+        H, W = first_frame.shape[:2]  # final collage cell size
         rows = math.ceil(len(ep_jpgs) / cols)
         canvas_h, canvas_w = rows * H, cols * W
 
@@ -193,13 +226,29 @@ def make_collage_videos(root: Path, fps: int = 30, cols: int = 7,
                     x0, x1 = col * W, (col + 1) * W
                     idx = min(t, n - 1)  # loop last frame once episode ends
                     p = ep_jpgs[k][idx]
-                    img = cv2.imread(str(p))
-                    if img is None:
+                    img_full = cv2.imread(str(p))
+                    if img_full is None:
                         continue
+
+                    # 1) crop
+                    if crop is not None:
+                        y0c, y1c, x0c, x1c = crop
+                        img = img_full[y0c:y1c, x0c:x1c]
+                    else:
+                        img = img_full
+
+                    # 2) resize back to original proportions (H0, W0)
+                    img = cv2.resize(img, (W0, H0), interpolation=cv2.INTER_AREA)
+
+                    # 3) final scale
                     if scale != 1.0:
-                        img = cv2.resize(img, (0, 0), fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+                        img = cv2.resize(img, (0, 0), fx=scale, fy=scale,
+                                        interpolation=cv2.INTER_AREA)
+
+                    # safety: should already match (H, W)
                     if img.shape[:2] != (H, W):
                         img = cv2.resize(img, (W, H), interpolation=cv2.INTER_AREA)
+
                     canvas[y0:y1, x0:x1] = _bgr_to_rgb(img)
                 yield canvas
 
@@ -223,21 +272,29 @@ def main():
     ap.add_argument("root", help="Path to root/ containing episode_XXXX/")
     ap.add_argument("--fps", type=int, default=15)
     ap.add_argument("--cam-idx", type=int, default=None, help="For singles: only this camera index")
-    ap.add_argument("--cols", type=int, default=3, help="Collage columns")
-    ap.add_argument("--scale", type=float, default=1.0, help="Collage downscale factor")
+    ap.add_argument("--cols", type=int, default=5, help="Collage columns")
+    ap.add_argument("--scale", type=float, default=0.25, help="Collage downscale factor")
     ap.add_argument("--collage", action="store_true", help="Only make collage videos")
     ap.add_argument("--single", action="store_true", help="Only make single videos")
     ap.add_argument("--eps_idx", type=int, default=None, help="(not used) For singles: only this episode index")
+    ap.add_argument("--crop", type=int, nargs=4, default=[150, -150, 250, -250], metavar=("Y0","Y1","X0","X1"),
+                help="Optional crop: y0 y1 x0 x1 in pixel coords")
     args = ap.parse_args()
+
+
 
     root = Path(args.root).expanduser().resolve()
     assert (args.single or args.collage) and args.single != args.collage, "Please specify --single or --collage"
 
+    crop = tuple(args.crop) if args.crop is not None else None
+
     if args.single:
-        make_single_videos(root, fps=args.fps, cam_idx=args.cam_idx, eps_idx=args.eps_idx)
+        make_single_videos(root, fps=args.fps, cam_idx=args.cam_idx,
+                        eps_idx=args.eps_idx, crop=crop)
 
     if args.collage:
-        make_collage_videos(root, fps=args.fps, cols=args.cols, scale=args.scale)
+        make_collage_videos(root, fps=args.fps, cols=args.cols,
+                            scale=args.scale, crop=crop)
 
 if __name__ == "__main__":
     main()

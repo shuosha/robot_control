@@ -8,7 +8,7 @@ MOVE_SLEEP = 1 / MOVE_RATE
 XYZ_VELOCITY = 1.0  # mm (in every MOVE_SLEEP interval)
 ANGLE_VELOCITY_MAX = 0.05  # degree
 
-GRIPPER_OPEN_MAX = 800
+GRIPPER_OPEN_MAX = 850
 GRIPPER_OPEN_MIN = 0
 
 POSITION_UPDATE_FREQ = 100.0  # command reader must read faster than this??

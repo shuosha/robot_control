@@ -10,7 +10,7 @@ from pathlib import Path
 import transforms3d
 
 from robot_control.utils.udp_util import udpReceiver, udpSender
-from robot_control.utils.kinematics_utils import KinHelper
+from robot_control.utils.kinematics_utils import KinHelper, trans_mat_to_pos_quat
 
 from robot_control.modules.common.communication import XARM_STATE_PORT, XARM_CONTROL_PORT, XARM_CONTROL_PORT_L, XARM_CONTROL_PORT_R
 from robot_control.modules.common.xarm import GRIPPER_OPEN_MIN, GRIPPER_OPEN_MAX
@@ -23,6 +23,9 @@ from third_party.gello.env import RobotEnv
 from third_party.gello.zmq_core.robot_node import ZMQClientRobot
 from third_party.gello.agents.gello_agent import DynamixelRobotConfig
 from third_party.gello.dynamixel.driver import DynamixelDriver
+
+import torch
+from robot_control.utils.math import matrix_from_quat, axis_angle_from_quat, quat_mul, quat_conjugate, quat_from_angle_axis, euler_xyz_from_quat, quat_from_euler_xyz, combine_frame_transforms, quat_from_matrix
 
 # np.set_printoptions(precision=2, suppress=True)
 
@@ -207,6 +210,9 @@ class ActionAgent(mp.Process):
         if self.pause:
             return
         else:
+            # 1. teleop 7dof
+            # 2. teleop 6dof
+            # 3. xy pushT
             if self.joint_space_dim == 2:
                 # compute eef pose of gello command
                 fk = self.kin_helper.compute_fk_sapien_links(command_joints[:7], [self.kin_helper.sapien_eef_idx])[0]
@@ -224,16 +230,30 @@ class ActionAgent(mp.Process):
                 cur_xyzrpy[3:] = transforms3d.euler.mat2euler(fk[:3, :3])
                 next_joints = self.kin_helper.compute_ik_sapien(command_joints[:7], cur_xyzrpy, verbose=False).tolist()
 
-            else:
-                fk = self.kin_helper.compute_fk_sapien_links(command_joints[:7], [self.kin_helper.sapien_eef_idx])[0]
-                fk = self.enforce_z_down(fk)
-                cur_xyzrpy = np.zeros(6)
-                cur_xyzrpy[:3] = fk[:3, 3]
-                cur_xyzrpy[3:] = transforms3d.euler.mat2euler(fk[:3, :3])
-                next_joints = self.kin_helper.compute_ik_sapien(command_joints[:7], cur_xyzrpy, verbose=False).tolist()
-                next_joints += [command_joints[7]]  # gripper
+            else: # teleop 6dof
+                # fk = self.kin_helper.compute_fk_sapien_links(command_joints[:7], [self.kin_helper.sapien_eef_idx])[0]
+                # _, quat = trans_mat_to_pos_quat(fk)
+
+                # target_quat = torch.from_numpy(quat).unsqueeze(0)  # (1,4)
+                # euler_xyz = torch.stack(euler_xyz_from_quat(target_quat), dim =1)
+                # euler_xyz[:, 0] = 3.14159
+                # euler_xyz[:, 1] = 0.0
+                # target_quat = quat_from_euler_xyz(
+                #     roll=euler_xyz[:, 0],
+                #     pitch=euler_xyz[:, 1],
+                #     yaw=euler_xyz[:, 2]
+                # )
+                # mat = matrix_from_quat(target_quat[0]).numpy()
+
+                # goal_xyzrpy = np.zeros(6)
+                # goal_xyzrpy[:3] = fk[:3, 3]
+                # goal_xyzrpy[3:] = transforms3d.euler.mat2euler(mat)
+
+                # next_joints = self.kin_helper.compute_ik_sapien(command_joints[:7], goal_xyzrpy, verbose=False).tolist()
+                # next_joints += [command_joints[7]]  # gripper
+                
                 # direct joint mapping
-                # next_joints = command_joints.tolist()
+                next_joints = command_joints.tolist()
                 
             self.command[:] = next_joints
             return

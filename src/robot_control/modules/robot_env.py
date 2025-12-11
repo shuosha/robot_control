@@ -52,7 +52,7 @@ from robot_control.agents.action_commander import ActionAgent
 from robot_control.agents.nn_buffer import NearestNeighborBuffer
 
 from robot_control.utils.kinematics_utils import KinHelper, trans_mat_to_pos_quat, gripper_raw_to_qpos, _quat_apply, _q_mul, _q_normalize
-from robot_control.utils.math import axis_angle_from_quat, quat_mul, quat_conjugate, quat_from_angle_axis, euler_xyz_from_quat, quat_from_euler_xyz, combine_frame_transforms
+from robot_control.utils.math import axis_angle_from_quat, quat_mul, quat_conjugate, quat_from_angle_axis, euler_xyz_from_quat, quat_from_euler_xyz, combine_frame_transforms, quat_from_matrix
 
 from robot_control.camera.multi_realsense import MultiRealsense
 from robot_control.camera.single_realsense import SingleRealsense
@@ -294,9 +294,10 @@ class RobotEnv(mp.Process):
             self.state_estimator = StateEstimator(
                 foundation_pose_dir=foundation_pose_dir,
             )
+            assert checkpoint_path is not None, "Checkpoint path must be provided for policy mode"
             self.policy = self.load_actor_mlp(
-                agent_yaml="logs/policy/2025-12-05_21-57-59_gearmesh_dmr_controller_noise_obj_obs/params/agent.yaml",
-                checkpoint_path="logs/policy/2025-12-05_21-57-59_gearmesh_dmr_controller_noise_obj_obs/nn/FactoryXarm.pth"
+                agent_yaml=f"{checkpoint_path}/params/agent.yaml",
+                checkpoint_path=f"{checkpoint_path}/nn/FactoryXarm.pth"
             )
 
             self.base_actions_agent = NearestNeighborBuffer(
@@ -307,8 +308,11 @@ class RobotEnv(mp.Process):
                 device="cuda",
                 pad=True,
             )
+
+            self.task_name = os.path.basename(foundation_pose_dir)
         else:
             self.state_estimator = None        
+            self.task_name = None
 
         # other parameters
         self.state = mp.Manager().dict()  # should be main explict exposed variable to the child class / process
@@ -320,6 +324,7 @@ class RobotEnv(mp.Process):
         # image visualization
         img_w, img_h = resolution
         views_per_cam = 2
+        assert len(self.realsense.serial_numbers) > 0, "At least one Realsense camera must be connected"
         num_cams = max(len(self.realsense.serial_numbers),1)
 
         # Image grid: stacked vertically
@@ -695,8 +700,8 @@ class RobotEnv(mp.Process):
         agent_cfg["params"]["load_checkpoint"] = True
         agent_cfg["params"]["resume_path"] = checkpoint_path
         agent_cfg["params"]["config"]["env_info"] = {
-            "observation_space": Box(-np.inf, np.inf, (35,), dtype=np.float32),
-            "action_space": Box(-1.0, 1.0, (7,), dtype=np.float32),
+            "observation_space": Box(-np.inf, np.inf, (34,), dtype=np.float32),
+            "action_space": Box(-1.0, 1.0, (6,), dtype=np.float32),
             "agents": 1,
             "value_size": 1,
         }
@@ -708,7 +713,7 @@ class RobotEnv(mp.Process):
         return policy
     
     def get_residual_observations(self, trans_out, gripper_out, dt,
-                                held_pos, fixed_pos, 
+                                held_pos, held_mat, fixed_pos, fixed_mat,
                                 action_trans_out, action_gripper_out,
                                 device='cuda', offline=True):
         curr_pos, fingertip_quat = trans_mat_to_pos_quat(trans_out["value"])
@@ -725,7 +730,62 @@ class RobotEnv(mp.Process):
         gripper = torch.tensor([gripper], dtype=torch.float32).unsqueeze(0).to(device)
 
         fixed_pos = torch.from_numpy(fixed_pos).unsqueeze(0).to(device).to(torch.float32)
+        fixed_mat = torch.from_numpy(fixed_mat).unsqueeze(0).to(device).to(torch.float32)
+        fixed_quat = quat_from_matrix(fixed_mat)
+
         held_pos = torch.from_numpy(held_pos).unsqueeze(0).to(device).to(torch.float32)
+        held_mat = torch.from_numpy(held_mat).unsqueeze(0).to(device).to(torch.float32)
+        held_quat = quat_from_matrix(held_mat)
+        print("held_quat:", held_quat)
+
+        if self.task_name == "gearmesh":
+            fixed_pos = combine_frame_transforms(
+                fixed_pos,
+                fixed_quat,
+                torch.tensor([[0.02025, 0.0, 0.0]], dtype=torch.float32).to(device),
+                torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32).to(device),
+            )[0]
+            fixed_pos[:,2] = 0.025
+
+            held_pos = combine_frame_transforms(
+                held_pos,
+                held_quat,
+                torch.tensor([[0.0, 0.0, 0.009]], dtype=torch.float32).to(device),
+                torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32).to(device),
+            )[0]
+
+  
+        elif self.task_name == "peginsert":
+            fixed_pos[:,2] = 0.025
+
+            def is_z_axis_up(q):
+                """
+                q: (1,4) torch tensor, quaternion (w,x,y,z)
+                Returns: Python bool -> True if z-axis points UP, False if DOWN
+                """
+                z_local = torch.tensor([[0., 0., 1.]], device=q.device, dtype=q.dtype)
+                z_world = _quat_apply(q, z_local)   # (1,3)
+
+                return bool(z_world[0, 2] > 0)
+
+            face_up = is_z_axis_up(held_quat)
+            print("face_up:", face_up)
+            if face_up:
+                held_pos = combine_frame_transforms(
+                    held_pos,
+                    held_quat,
+                    torch.tensor([[0.0, 0.0, 0.045]], dtype=torch.float32).to(device),
+                    torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32).to(device),
+                )[0]
+            else:
+                held_pos = combine_frame_transforms(
+                    held_pos,
+                    held_quat,
+                    torch.tensor([[0.0, 0.0, 0.005]], dtype=torch.float32).to(device),
+                    torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32).to(device),
+                )[0]
+
+        print("held_pos:", held_pos)
 
         fingertip_pos_rel_fixed = fingertip_pos - fixed_pos  # (1,3)
         fingertip_pos_rel_held = fingertip_pos - held_pos # (1,3)
@@ -781,19 +841,16 @@ class RobotEnv(mp.Process):
                 base_actions[:, :3] = (gello_actions[:, :3] - self.last_gello_pos) + fingertip_pos
             self.last_gello_pos = last_gello
 
-            # self.real_base = base_actions.clone()
-            # self.real_base[:, :3] = self.last_base_pos
-
         obs = torch.cat([
             fingertip_pos, fingertip_quat, gripper,
             fingertip_pos_rel_fixed,
             fingertip_pos_rel_held,
             ee_linvel_fd, ee_angvel_fd,
-            base_actions,
+            gello_actions,
             self.prev_actions
         ], dim=-1).to(torch.float32)  # (1,35)
 
-        return obs
+        return obs, fixed_pos, held_pos, base_actions[:,:3]
 
     def apply_residual(self, residual, base_actions, qpos, device='cuda'):
         pos_actions = residual[:, 0:3] * torch.tensor([[0.03, 0.03, 0.03]], dtype=torch.float32).to(device)  # (1,3)
@@ -825,8 +882,8 @@ class RobotEnv(mp.Process):
 
         actions_fingertip = torch.cat([target_pos, target_quat, target_gripper], dim=-1)  # (1,8)
 
-        delta = torch.clamp(actions_fingertip[:,:3] - self.last_gello_pos, min=-0.03, max=0.03)  # (1,8)
-        actions_fingertip[:,:3] = self.last_gello_pos + delta  # (1,8)
+        # delta = torch.clamp(actions_fingertip[:,:3] - self.last_gello_pos, min=-0.03, max=0.03)  # (1,8)
+        # actions_fingertip[:,:3] = self.last_gello_pos + delta  # (1,8)
 
         goal_fingertip_pos = actions_fingertip[:, :3].clone()
         actions_eef = actions_fingertip.clone()
@@ -849,8 +906,8 @@ class RobotEnv(mp.Process):
         robot_action_record_dir = root / "logs" / self.data_dir / self.exp_name / "robot_action"
         os.makedirs(robot_action_record_dir, exist_ok=True)
 
-        env_obs_record_dir = root / "logs" / self.data_dir / self.exp_name / "env_obs"
-        os.makedirs(env_obs_record_dir, exist_ok=True)
+        # env_obs_record_dir = root / "logs" / self.data_dir / self.exp_name / "env_obs"
+        # os.makedirs(env_obs_record_dir, exist_ok=True)
 
         # initialize kinematics helper
         self.kin_helper = KinHelper(robot_name='xarm7')
@@ -885,7 +942,9 @@ class RobotEnv(mp.Process):
         self.prev_fingertip_quat = None
         self.last_gello_pos = None
         get_obs_time = None
-        residual = torch.zeros((1,7), dtype=torch.float32, device='cuda')
+        residual = torch.zeros((1,6), dtype=torch.float32, device='cuda')
+
+        fixed2cam = None
 
         obs_buf = []
 
@@ -924,23 +983,38 @@ class RobotEnv(mp.Process):
                     for k, v in perception_out['value'].items():
                         rgbs[k] = v["color"]
                         depths[k] = v["depth"]
+                
+                    if self.state_estimator is not None:
+                        held2cam = self.state_estimator.estimate_object_poses( # obj2cam
+                            rgbs[0],
+                            depths[0],
+                            retrack=self.action_agent.track_obj.value,
+                            obj_name="held_asset"
+                        )
 
-                    obj_poses = self.state_estimator.estimate_object_poses( # obj2cam
-                        rgbs[0],
-                        depths[0],
-                        retrack=self.action_agent.track_obj.value
-                    )
-                    if self.action_agent.track_obj.value:
-                        self.action_agent.track_obj.value = False
+                        if fixed2cam is None or self.action_agent.track_obj.value:
+                            fixed2cam = self.state_estimator.estimate_object_poses( # obj2cam
+                                rgbs[0],
+                                depths[0],
+                                retrack=self.action_agent.track_obj.value,
+                                obj_name="fixed_asset"
+                            )
 
-                held2base = self.state_estimator.cam2base @ obj_poses[0]
-                held_pos = held2base[:3, 3]  # obj_poses[0, :3, 3]
-                fixed_pos = np.array([0.384, -0.096, 0.025]) #obj_poses[1, :3, 3]
+                        if self.action_agent.track_obj.value:
+                            self.action_agent.track_obj.value = False
+
+                        held2base = self.state_estimator.cam2base @ held2cam
+                        held_pos = held2base[:3, 3]  # obj_poses[0, :3, 3]
+                        held_mat = held2base[:3, :3]
+                        # fixed_pos = np.array([0.384, -0.096, 0.025]) #obj_poses[1, :3, 3]
+                        fixed2base = self.state_estimator.cam2base @ fixed2cam
+                        fixed_pos = fixed2base[:3, 3]
+                        fixed_mat = fixed2base[:3, :3]
 
                 # reset robot to initial pose if "r" is pressed
                 if self.action_agent.reset.value:
-                    timestep = 0 
-                    if not new_eps: # restarting at 
+                    timestep = 0
+                    if not new_eps:  # restarting at
                         eps_idx += 1
                         new_eps = True
 
@@ -969,24 +1043,24 @@ class RobotEnv(mp.Process):
                             print("dt: ", dt)
 
                         self.prev_actions = residual
-                        obs = self.get_residual_observations(trans_out, gripper_out, dt,
-                                                             held_pos, fixed_pos, 
+                        obs, fixed_pos, held_pos, base_pos_delta_gello = self.get_residual_observations(trans_out, gripper_out, dt,
+                                                             held_pos, held_mat, fixed_pos, fixed_mat,
                                                              action_trans_out, action_gripper_out,
                                                              offline=False) # tensor (1, 35)
                         obs_buf.append(obs)
 
                         fingertip_pos = obs[0, 0:3].cpu().numpy()
 
-                        base_pos = obs[0, -15:-12].cpu().numpy()
+                        base_pos = base_pos_delta_gello.cpu().numpy()
 
                         # print("obs: ", obs)
-                        residual = self.policy.get_action(obs, is_deterministic=True) # tensor (1,7)
+                        residual = self.policy.get_action(obs, is_deterministic=True) # tensor (1,6)
                         # print("residual: ", residual)
                         # pre physics step
                         residual = residual * 0.2 + self.prev_actions * 0.8  # smooth residual
                         # apply actions
                         # print("base actions:", obs[:, -15:-7])  # tensor (1,8)
-                        actions, final_pos = self.apply_residual(residual, obs[:, -15:-7], qpos_out["value"])  # np (8,)
+                        actions, final_pos = self.apply_residual(residual, obs[:, -14:-6], qpos_out["value"])  # np (8,)
                         final_pos = final_pos[0].cpu().numpy()
                         if self.action_receiver == "residual_offline":
                             self.action_agent.command[:] = actions
@@ -1044,15 +1118,18 @@ class RobotEnv(mp.Process):
                 row_imgs = []
                 for row in range(len(self.realsense.serial_numbers)):
                     if self.state_estimator is not None and row == 0:
-                        try:
-                            for idx in range(obj_poses.shape[0]):
-                                rgbs[row] = self.state_estimator.draw_detected_objects(
-                                    rgbs[row],
-                                    obj_poses[idx],
-                                )
-                        except BaseException as e:
-                            print(f"Error in drawing detected objects")
-                            pass
+                        # try:
+                        #     rgbs[row] = self.state_estimator.draw_detected_objects(
+                        #         rgbs[row],
+                        #         held2cam,
+                        #     )
+                        #     rgbs[row] = self.state_estimator.draw_detected_objects(
+                        #         rgbs[row],
+                        #         fixed2cam,
+                        #     )
+                        # except BaseException as e:
+                        #     print(f"Error in drawing detected objects")
+                        #     pass
 
                         try: 
                             rgbs[row] = self.state_estimator.draw_triangle_from_base_points(
@@ -1066,6 +1143,18 @@ class RobotEnv(mp.Process):
                                 rgbs[row] = self.state_estimator.project_points_on_image(
                                     rgbs[row],
                                     self.last_gello_pos.cpu().numpy(), # (1,3)
+                                )
+
+                            rgbs[row] = self.state_estimator.project_points_on_image(
+                                    rgbs[row],
+                                    held_pos.cpu().numpy(), # (1,3)
+                                    color=(255, 0, 0)
+                                )
+                            
+                            rgbs[row] = self.state_estimator.project_points_on_image(
+                                    rgbs[row],
+                                    fixed_pos.cpu().numpy(), # (1,3)
+                                    color=(0, 255, 0)
                                 )
                         except BaseException as e:
                             print(f"Error in drawing triangle: {e.with_traceback()}")

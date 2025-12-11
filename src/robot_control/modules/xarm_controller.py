@@ -455,7 +455,7 @@ class XarmController(mp.Process):
         if not self.is_alive:
             raise ValueError("Robot is not alive!")
     
-        if self.gripper_enable and len(next_arm_goal) == 7: #TODO: hardcoded right now            
+        if self.gripper_enable and len(next_arm_goal) == 7 and self.cur_gripper_pos is not None: #TODO: hardcoded right now            
             if np.abs(self.cur_gripper_pos - denormalized_gripper_pos) > 50.0:
                 self._arm.set_gripper_position(denormalized_gripper_pos, wait=False, speed=8000)
 
@@ -469,7 +469,36 @@ class XarmController(mp.Process):
             self._arm.clean_warn()
             
     # ======= xarm control END =======
+    def enforce_z_down(self, fk: np.ndarray) -> np.ndarray:
+            """Modify fk so that its orientation has z-axis pointing down,
+            but keeps the closest possible yaw to the original orientation."""
+            fk = fk.copy()
+            R = fk[:3, :3]
 
+            # Desired z axis in base frame (pointing down)
+            z_axis = np.array([0.0, 0.0, -1.0])
+
+            # Take current x-axis of the EE in base frame
+            x_curr = R[:, 0]
+
+            # Project x_curr onto plane orthogonal to z_axis
+            x_proj = x_curr - np.dot(x_curr, z_axis) * z_axis
+            norm = np.linalg.norm(x_proj)
+            if norm < 1e-6:
+                # If projection is degenerate, fall back to a default horizontal axis
+                x_axis = np.array([1.0, 0.0, 0.0])
+            else:
+                x_axis = x_proj / norm
+
+            # y = z × x to complete right-handed frame
+            y_axis = np.cross(z_axis, x_axis)
+
+            # Orthonormalize y just in case
+            y_axis /= np.linalg.norm(y_axis)
+
+            R_new = np.column_stack([x_axis, y_axis, z_axis])
+            fk[:3, :3] = R_new
+            return fk
     # ======= main thread loop =======
     def run(self):
         # the arm initialization must be invoked in the same process
@@ -533,6 +562,13 @@ class XarmController(mp.Process):
 
                         curr_arm_state = np.array(self._arm.get_servo_angle()[1][0:7]) / 180. * np.pi
                         prev_arm_state = curr_arm_state
+
+                        # fk = self.teleop_kin_helper.compute_fk_sapien_links(arm_state_goal, [self.teleop_kin_helper.sapien_eef_idx])[0]
+                        # fk = self.enforce_z_down(fk)
+                        # goal_xyzrpy = np.zeros(6)
+                        # goal_xyzrpy[:3] = fk[:3, 3]
+                        # goal_xyzrpy[3:] = transforms3d.euler.mat2euler(fk[:3, :3])
+                        # arm_state_goal = self.teleop_kin_helper.compute_ik_sapien(curr_arm_state, goal_xyzrpy, verbose=False).tolist()
 
                         if self.mismatch_kinematics: # TODO: currently only support xarm7 teleop 
                             teleop_cart = self.teleop_kin_helper.compute_fk_sapien_links(command_state[:7], [self.teleop_kin_helper.sapien_eef_idx])[0] # compute fk with xarm7

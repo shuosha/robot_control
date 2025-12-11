@@ -25,12 +25,12 @@ from robot_control.calibration.realsense_manager import RealSenseManager
 # =========================
 ARUCO_DICT = cv2.aruco.getPredefinedDictionary(cv2.aruco.DICT_4X4_250)
 CALIB_BOARD = cv2.aruco.CharucoBoard(
-    size=(6, 5),
-    squareLength=0.04,
-    markerLength=0.03,
+    size=(4, 5),
+    squareLength=0.05,
+    markerLength=0.036,
     dictionary=ARUCO_DICT,
 )
-CHECKER_SIZE_M = 0.04
+CHECKER_SIZE_M = 0.05
 DETECTOR_PARAMS = cv2.aruco.CharucoParameters()
 DETECTOR = cv2.aruco.CharucoDetector(CALIB_BOARD, DETECTOR_PARAMS)
 
@@ -132,7 +132,7 @@ def _get_ee_poses(ee_pattern: Path) -> tuple[List[np.ndarray], List[np.ndarray],
         with open(name) as f:
             ee = json.load(f)
         # quat in [x, y, z, w]
-        R_list.append(R.from_quat(ee["quat"], scalar_first=False).as_matrix())
+        R_list.append(R.from_quat(ee["quat"]).as_matrix())
         t_list.append(np.array(ee["translation"], dtype=float).reshape(3, 1))
     return R_list, t_list, ee_files
 
@@ -280,7 +280,7 @@ class HandEyeCalibrator:
         self.intr_path = self.work_dir / "intrinsics.json"
 
         if self.init_robot and self.robot_ip is not None:
-            self.robot = XArmRobot(ip=self.robot_ip, control_frequency=500.0, max_delta=0.005)
+            self.robot = XArmRobot(ip=self.robot_ip, control_frequency=500.0, max_delta=0.01)
 
     # 1) fixed calibration: per-camera board2cam + intrinsics (+ save visualization)
     def fixed_calibration(self, serials: Dict[str, str]) -> None:
@@ -556,7 +556,7 @@ if __name__ == "__main__":
     work_dir = Path(args.work_dir).expanduser()
     # Example serials—replace with your own:
     # serials = {"wrist": "130322270735", "side": "239222303153", "base": "239222300740"}
-    serials = {"wrist": "130322270735", "front": "239222300740"}
+    serials = {"wrist": "130322270735", "front": "239222303404", "side": "239222303153"}
 
     if args.mode == "fixed":
         cal = HandEyeCalibrator(work_dir=work_dir, robot_ip=None, show_gui=args.show_gui, init_robot=False)

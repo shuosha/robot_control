@@ -4,7 +4,6 @@ import time
 import numpy as np
 import transforms3d
 from pathlib import Path
-import open3d as o3d
 from scipy.spatial.transform import Rotation as R
 import torch
 import warnings
@@ -15,23 +14,14 @@ import sapien.core as sapien
 from robot_control.utils.utils import get_root
 root: Path = get_root(__file__)
 
+from robot_control.utils.math import combine_frame_transforms
+
 _ENGINE = None
 
-def np2o3d(pcd, color=None):
-    # pcd: (n, 3)
-    # color: (n, 3)
-    pcd_o3d = o3d.geometry.PointCloud()
-    pcd_o3d.points = o3d.utility.Vector3dVector(pcd)
-    if color is not None:
-        assert pcd.shape[0] == color.shape[0]
-        assert color.max() <= 1
-        assert color.min() >= 0
-        pcd_o3d.colors = o3d.utility.Vector3dVector(color)
-    return pcd_o3d
 
 def gripper_raw_to_qpos(raw: float) -> float:
-    raw_clipped = np.clip(raw, 0.0, 800.0)
-    return (800.0 - raw_clipped) / 800.0
+    raw_clipped = np.clip(raw, 0.0, 850.0)
+    return (850.0 - raw_clipped) / 850.0
 
 def trans_mat_to_pos_quat(trans_mat: np.ndarray) -> np.ndarray:
     pos = trans_mat[..., :3, 3]
@@ -203,5 +193,53 @@ def test_fk():
 
         time.sleep(0.1)
 
+def get_initial_poses_sim():
+    robot_name = 'xarm7'
+    data = np.load("logs/teleop/1210_nut_thread_1_processed/debug/robot_trajectories.npz", allow_pickle=True)
+    
+    offset_eefsim2eefreal = np.array([0.0, 0.0, -0.23 + 0.17], dtype=np.float32)
+
+    init_qpos_list = []  # in EEF frame (tip→EEF)
+
+    tot_eps = 1
+    for i in range(tot_eps):
+        kin_helper = KinHelper(robot_name=robot_name, headless=True)
+        eps_name = f"episode_{i:04d}"
+        init_qpos = data[f"{eps_name}/obs.qpos"][0]
+        init_pos = data[f"{eps_name}/obs.eef_pos"][0]
+        init_quat = data[f"{eps_name}/obs.eef_quat"][0]
+
+        eef_pos = torch.tensor(init_pos, dtype=torch.float32).unsqueeze(0) # (1, 3)
+        eef_quat = torch.tensor(init_quat, dtype=torch.float32).unsqueeze(0) # (1, 4) wxyz
+        sim_eef_pos = combine_frame_transforms(
+            eef_pos,
+            eef_quat,
+            torch.tensor([[0.0, 0.0, 0.23 - 0.17]], dtype=torch.float32),
+            torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=torch.float32),
+        )[0]
+        
+        sim_eef_pos = sim_eef_pos[0].numpy()
+
+
+        quat_xyzw = init_quat[[1, 2, 3, 0]]
+        eef_euler_xyz = R.from_quat(quat_xyzw).as_euler("xyz", degrees=False)
+
+
+        ik_qpos = kin_helper.compute_ik_sapien(
+            initial_qpos=init_qpos,
+            cartesian=np.array(list(sim_eef_pos) + list(eef_euler_xyz)).astype(np.float32),
+            verbose=False,
+        )
+        init_qpos_list.append(ik_qpos)
+        print(f"Episode {i}:")
+        print("Original qpos:", init_qpos)
+        print("IK qpos:", ik_qpos)
+        print("cart pos before:", init_pos)
+        print("cart pos sim eef:", sim_eef_pos)
+
+    init_qpos_array = np.array(init_qpos_list)
+    np.save("logs/teleop/1210_nut_thread_1_processed/debug/init_qpos_sim.npy", init_qpos_array)
+
+
 if __name__ == "__main__":
-    test_fk()
+    get_initial_poses_sim()

@@ -58,10 +58,7 @@ class StateEstimator():
         self.foundation_pose_dir = foundation_pose_dir
         # Initialize other necessary variables and models here
 
-        obj_list = os.path.join(foundation_pose_dir, "object_list.txt")
-        with open(obj_list, 'r') as f:
-            self.object_list = [line.strip() for line in f.readlines()]
-            print(f"Loaded object list: {self.object_list}")
+        self.object_list = ["held_asset", "fixed_asset"]
         self.num_objects = len(self.object_list)
 
         self.empty_scene = cv2.imread(os.path.join(foundation_pose_dir, "empty_scene.png"))
@@ -78,50 +75,55 @@ class StateEstimator():
         with open(os.path.join(foundation_pose_dir, "corners.json"), "r") as f:
             self.corners_dict = json.load(f)
 
-        self.estimators = {}
+        held_mesh = trimesh.load(os.path.join(foundation_pose_dir, "held_asset.obj"))
+        self.held_asset_estimator = FoundationPose(
+            model_pts=held_mesh.vertices, 
+            model_normals=held_mesh.vertex_normals,
+            mesh=held_mesh,
+            debug_dir=foundation_pose_dir,
+            debug=0
+        )
 
-        for i in range(self.num_objects):
-            obj_name = self.object_list[i]
-            mesh = trimesh.load(os.path.join(foundation_pose_dir, f"{obj_name}.obj"))
-            self.estimators[obj_name] = FoundationPose(
-                model_pts=mesh.vertices, 
-                model_normals=mesh.vertex_normals, 
-                mesh=mesh, 
-                debug_dir=foundation_pose_dir, 
-                debug=0
-            )
+        fixed_mesh = trimesh.load(os.path.join(foundation_pose_dir, "fixed_asset.obj"))
+        self.fixed_asset_estimator = FoundationPose(
+            model_pts=fixed_mesh.vertices, 
+            model_normals=fixed_mesh.vertex_normals,
+            mesh=fixed_mesh,
+            debug_dir=foundation_pose_dir,
+            debug=0
+        )
 
-        self.cur_object_poses_q = np.array([0.0] * (self.num_objects * 16), dtype=np.float32)
+    def estimate_object_poses(self, bgr, depth, obj_name, retrack=False):
+        assert obj_name in ["fixed_asset", "held_asset"], "obj_name must be 'fixed_asset' or 'held_asset'"
 
-    def estimate_object_poses(self, bgr, depth, retrack=False):
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         depth = depth / 1000.0 # convert to meters
-        for i in range(self.num_objects):
-            obj_name = self.object_list[i]
-            # todo add restart estimator if lost
-            if self.estimators[obj_name].pose_last is None or retrack:
-                corners = self.corners_dict[obj_name]
-                mask = get_mask(bgr, self.empty_scene, corners)
-                # cv2.imwrite(f"masks_{obj_name}.png", mask * 255)
-                # cv2.imwrite(f"rgb_{obj_name}.png", self.rgb)
-                # cv2.imwrite(f"depth_{obj_name}.png", depth)
-                obj2cam = self.estimators[obj_name].register(
-                    K=self.cam_k,
-                    rgb=rgb,
-                    depth=depth,
-                    ob_mask=mask,
-                    iteration=5,
-                )
-            else:
-                obj2cam = self.estimators[obj_name].track_one(
-                    K=self.cam_k,
-                    rgb=rgb,
-                    depth=depth,
-                    iteration=2,
-                )
-            self.cur_object_poses_q[i*16:(i+1)*16] = obj2cam.flatten().tolist()
+
+        if obj_name == "held_asset":
+            estimator = self.held_asset_estimator
+        else:
+            estimator = self.fixed_asset_estimator
+
+        # todo add restart estimator if lost
+        if estimator.pose_last is None or retrack:
+            corners = self.corners_dict[obj_name]
+            mask = get_mask(bgr, self.empty_scene, corners)
+            obj2cam = estimator.register(
+                K=self.cam_k,
+                rgb=rgb,
+                depth=depth,
+                ob_mask=mask,
+                iteration=5,
+            )
+        else:
+            obj2cam = estimator.track_one(
+                K=self.cam_k,
+                rgb=rgb,
+                depth=depth,
+                iteration=2,
+            )
         
-        return self.cur_object_poses_q.reshape(self.num_objects, 4, 4)
+        return obj2cam
 
     def draw_detected_objects(self, bgr_image, obj2cam):
         bgr = bgr_image.copy()
@@ -136,7 +138,7 @@ class StateEstimator():
         # Implement object detection and drawing logic here
         return vis
     
-    def project_points_on_image(self, image, points_base):
+    def project_points_on_image(self, image, points_base, color=(0,0,255)) -> np.ndarray:
         """
         image: (H,W,3) uint8
         points_base: (N,3) in base frame
@@ -178,7 +180,7 @@ class StateEstimator():
         # 3) draw on the image
         img_vis = image.copy()
         for px, py in zip(u, v):
-            cv2.circle(img_vis, (px, py), 3, (0, 0, 255), -1)  # red dots
+            cv2.circle(img_vis, (px, py), 3, color, -1)
 
         return img_vis 
 

@@ -55,7 +55,7 @@ if __name__ == '__main__':
 
         resolution=(848, 480),
         capture_fps=30,
-        record_fps=30,
+        record_fps=15,
         perception_process_func=None,
         foundation_pose_dir=args.fp_dir,
 
