@@ -1,11 +1,35 @@
-from multiprocessing import shared_memory
 import warnings
 warnings.filterwarnings("ignore", category=UserWarning, module="pygame.pkgdata")
 
-import os, sys, contextlib
+import os
+import sys
+import contextlib
+import json
+import glob
+import pickle
+import subprocess
+import time
+import threading
+from copy import deepcopy
+from enum import Enum
+from pathlib import Path
+from multiprocessing.managers import SharedMemoryManager
+from typing import Callable, Sequence, List, Literal, Optional, Union
+
+import cv2
+import numpy as np
+import torch
+import transforms3d
+import yaml
+from pynput import keyboard
+from scipy.spatial.transform import Rotation as R
+from gymnasium.spaces import Box
+from rl_games.algos_torch.players import PpoPlayerContinuous
+import multiprocess as mp
 
 @contextlib.contextmanager
 def suppress_stdout():
+    """Context manager to suppress stdout and stderr output."""
     with open(os.devnull, "w") as devnull:
         old_stdout, old_stderr = sys.stdout, sys.stderr
         sys.stdout, sys.stderr = devnull, devnull
@@ -14,68 +38,37 @@ def suppress_stdout():
         finally:
             sys.stdout, sys.stderr = old_stdout, old_stderr
 
-from typing import Callable, Sequence, List, Literal, Optional
-from enum import Enum
-import numpy as np
-import multiprocess as mp
-import time
-import threading
-import cv2
 with suppress_stdout():
     import pygame
     pygame.init()
 
-import os
-import pickle
-import transforms3d
-import subprocess
-from multiprocessing.managers import SharedMemoryManager
-from pynput import keyboard
-from pathlib import Path
-from copy import deepcopy
-import json, glob
-import torch
-from scipy.spatial.transform import Rotation as R
-from pprint import pprint
-from typing import Union
-
 from robot_control.utils.utils import get_root, mkdir
-root: Path = get_root(__file__)
-
 from robot_control.modules.perception import Perception
 from robot_control.modules.xarm_controller import XarmController
 from robot_control.modules.state_estimator import StateEstimator
 from robot_control.utils.udp_util import udpReceiver, udpSender
-
 from robot_control.agents.teleop_keyboard import KeyboardTeleop
 from robot_control.agents.action_commander import ActionAgent
 from robot_control.agents.nn_buffer import NearestNeighborBuffer
-
-from robot_control.utils.kinematics_utils import KinHelper, trans_mat_to_pos_quat, gripper_raw_to_qpos, _quat_apply, _q_mul, _q_normalize
-from robot_control.utils.math import axis_angle_from_quat, quat_mul, quat_conjugate, quat_from_angle_axis, euler_xyz_from_quat, quat_from_euler_xyz, combine_frame_transforms, quat_from_matrix
-
+from robot_control.utils.kinematics_utils import (
+    KinHelper, trans_mat_to_pos_quat, gripper_raw_to_qpos, 
+    _quat_apply, _q_mul, _q_normalize
+)
+from robot_control.utils.math import (
+    axis_angle_from_quat, quat_mul, quat_conjugate, quat_from_angle_axis,
+    euler_xyz_from_quat, quat_from_euler_xyz, combine_frame_transforms, quat_from_matrix
+)
 from robot_control.camera.multi_realsense import MultiRealsense
 from robot_control.camera.single_realsense import SingleRealsense
 
-import torch
-import sys
-import yaml
-import numpy as np
-from rl_games.algos_torch.players import PpoPlayerContinuous
-# try:
-from gymnasium.spaces import Box
-# except ImportError:
-#     from gym.spaces import Box  # fallback if gymnasium is not installed
-
-# from robot_control.utils.pi05_wrapper import PI05Wrapper
-
-# TODO: import policy inference wrapper
+root: Path = get_root(__file__)
 
 XARM7_LEFT_IP = "192.168.1.196"
 XARM7_RIGHT_IP = "192.168.1.224"
 UF850_IP = "192.168.1.220"
 
 class EnvEnum(Enum):
+    """Debug verbosity levels for environment logging."""
     NONE = 0
     INFO = 1
     DEBUG = 2
@@ -280,7 +273,10 @@ class RobotEnv(mp.Process):
                 # assert checkpoint_path is not None, "Checkpoint path must be provided for policy mode"
                 # self.policy = PolicyInferenceWrapper(checkpoint_path=checkpoint_path)
 
-                self.policy = PI05Wrapper(prompt="pick up green cube", cfg_name="pi05_droid", checkpoint_path="gs://openpi-assets/checkpoints/pi05_droid")
+                # TODO: Uncomment when PI05Wrapper is available
+                # from robot_control.utils.pi05_wrapper import PI05Wrapper
+                # self.policy = PI05Wrapper(prompt="pick up green cube", cfg_name="pi05_droid", checkpoint_path="gs://openpi-assets/checkpoints/pi05_droid")
+                raise NotImplementedError("PI05Wrapper is not currently available")
 
             # create action agent
             if pusht_mode:
@@ -350,7 +346,15 @@ class RobotEnv(mp.Process):
 
         # TODO add calibration info back in 
 
+    # ========== Process Control Methods ==========
+    
     def real_start(self, start_time) -> None:
+        """
+        Start real robot environment: initialize cameras, perception, robot controllers, and action agent.
+        
+        Args:
+            start_time: Timestamp for synchronization.
+        """
         self._real_alive.value = True
         print("starting real env")
         
@@ -389,6 +393,12 @@ class RobotEnv(mp.Process):
         self.update_real_state_t.start()
 
     def real_stop(self, wait=False) -> None:
+        """
+        Stop real robot environment: stop robot controllers, perception, cameras, and cleanup threads.
+        
+        Args:
+            wait: Whether to wait for processes to finish (currently unused).
+        """
         self._real_alive.value = False
         if self.robot_name == "xarm7":
             if self.bimanual and self.left_xarm_controller.is_controller_alive:
@@ -408,6 +418,7 @@ class RobotEnv(mp.Process):
 
     @property
     def real_alive(self) -> bool:
+        """Check if real environment is alive (perception, robot controllers all running)."""
         alive = self._real_alive.value
         if self.perception is not None:
             alive = alive and self.perception.alive.value
@@ -419,7 +430,10 @@ class RobotEnv(mp.Process):
         self._real_alive.value = alive
         return self._real_alive.value
 
+    # ========== State Update Methods ==========
+    
     def _update_perception(self) -> None:
+        """Update perception output state from perception module queue."""
         if self.perception.alive.value:
             if not self.perception.perception_q.empty():
                 self.state["perception_out"] = {
@@ -428,10 +442,11 @@ class RobotEnv(mp.Process):
         return
 
     def _update_robot(self) -> None:
+        """Update robot state (end-effector transforms, joint positions, gripper, force) from controller."""
         if self.bimanual and self.robot_name == "xarm7":
             if self.left_xarm_controller.is_controller_alive and self.right_xarm_controller.is_controller_alive:
                 self.state["trans_out"] = {
-                    "capture_time": self.left_arm_controller.cur_time_q.value,
+                    "capture_time": self.left_xarm_controller.cur_time_q.value,
                     "left_value": np.array(self.left_xarm_controller.cur_trans_q[:]).reshape(4, 4),
                     "right_value": np.array(self.right_xarm_controller.cur_trans_q[:]).reshape(4, 4),
                 }
@@ -478,6 +493,7 @@ class RobotEnv(mp.Process):
         return
     
     def _update_command(self) -> None:
+        """Update action command state (commanded joint positions, end-effector transforms, gripper) from action agent."""
         if self.bimanual and self.robot_name == "xarm7":
             raise NotImplementedError("Bimanual command update is not implemented yet")
         elif self.robot_name == "xarm7":
@@ -512,6 +528,7 @@ class RobotEnv(mp.Process):
         return
 
     def update_real_state(self) -> None:
+        """Main state update loop running in separate thread: updates robot, perception, and command states."""
         while self.real_alive:
             try:
                 if self.robot_name == "xarm7" or self.robot_name == "aloha":
@@ -525,7 +542,10 @@ class RobotEnv(mp.Process):
                 break
         print("update_real_state stopped")
 
+    # ========== Visualization Methods ==========
+    
     def display_image(self):
+        """Display camera images in pygame window, updating from shared memory buffer."""
         self.image_window = pygame.display.set_mode((self.screen_width, self.screen_height))
         pygame.display.set_caption('Image Display Window')
         while self._alive.value:
@@ -549,17 +569,25 @@ class RobotEnv(mp.Process):
         print("Image display stopped")
 
     def start_image_display(self):
+        """Start image display thread for real-time camera visualization."""
         # Start a thread for the image display loop
         self.image_display_thread = threading.Thread(name="display_image", target=self.display_image)
         self.image_display_thread.start()
 
+    # ========== Control and Action Methods ==========
+    
     def get_qpos_from_action_8d(self, action, curr_qpos) -> np.ndarray:
-        '''
-        action shape: (8,)
-        action[0:3]: x, y, z position of the end effector in the base frame
-        action[3:7]: quaternion (w, x, y, z) of the end effector orientation in the base frame
-        action[7]: gripper qpos (0 for open, 0.8 for close)
-        '''
+        """
+        Convert 8D action (position, quaternion, gripper) to joint positions using inverse kinematics.
+        
+        Args:
+            action: Action array of shape (8,). action[0:3] is xyz position, action[3:7] is quaternion (w,x,y,z), 
+                   action[7] is gripper qpos (0=open, 0.8=close).
+            curr_qpos: Current joint positions for IK initialization.
+        
+        Returns:
+            Joint positions concatenated with gripper qpos, shape (8,).
+        """
         assert action.shape[0] == 8, "Action shape must be (8,) for robot control"
         action_np = action.cpu().numpy() if isinstance(action, torch.Tensor) else action
 
@@ -574,6 +602,13 @@ class RobotEnv(mp.Process):
         return np.concatenate([goal_qpos, gripper_qpos], axis=0)  # (8,)
 
     def set_robot_initial_pose(self, init_pose: Sequence[float], fps=30.0) -> None:
+        """
+        Set robot to initial pose by sending joint commands at specified FPS.
+        
+        Args:
+            init_pose: Initial joint angles in degrees (will be converted to radians).
+            fps: Command update frequency for smooth motion.
+        """
         if self.bimanual:
             raise NotImplementedError("Bimanual replay is not implemented yet")
         else:
@@ -596,7 +631,23 @@ class RobotEnv(mp.Process):
             elif self.action_receiver == "keyboard" or self.action_receiver == "gello" or self.action_receiver == "residual":
                 self.xarm_controller.teleop_activated.value = False
 
+    # ========== Data Storage Methods ==========
+    
     def store_robot_data(self, trans_out, qpos_out, gripper_out, action_qpos_out, action_trans_out, action_gripper_out, robot_obs_record_dir, robot_action_record_dir, force_out=None) -> None:
+        """
+        Store robot observation and action data to JSON files.
+        
+        Args:
+            trans_out: End-effector transform dictionary.
+            qpos_out: Joint positions dictionary.
+            gripper_out: Gripper state dictionary.
+            action_qpos_out: Commanded joint positions dictionary.
+            action_trans_out: Commanded end-effector transform dictionary.
+            action_gripper_out: Commanded gripper state dictionary.
+            robot_obs_record_dir: Directory to save observation JSON files.
+            robot_action_record_dir: Directory to save action JSON files.
+            force_out: Optional force/torque data dictionary.
+        """
         res_obs = {}
         if self.bimanual:
             # store eef poses
@@ -678,6 +729,19 @@ class RobotEnv(mp.Process):
             json.dump(res_action, f, indent=4)
 
     def _read_env_obs(self, rgbs, depths, trans_out, qpos_out, gripper_out):
+        """
+        Read and format environment observations from camera and robot state.
+        
+        Args:
+            rgbs: List of RGB images.
+            depths: List of depth images.
+            trans_out: End-effector transform dictionary.
+            qpos_out: Joint positions dictionary.
+            gripper_out: Gripper state dictionary.
+        
+        Returns:
+            Dictionary containing formatted observations.
+        """
         if self.bimanual:
             raise NotImplementedError("Bimanual real env is not implemented yet")
         elif not self.bimanual and self.robot_name == "xarm7":
@@ -691,10 +755,22 @@ class RobotEnv(mp.Process):
 
         return env_obs
 
+    # ========== Policy and Residual Control Methods ==========
+    
     def load_actor_mlp(self,
         agent_yaml: str,
         checkpoint_path: str,
     ) -> torch.nn.Module:
+        """
+        Load policy model from YAML config and checkpoint.
+        
+        Args:
+            agent_yaml: Path to agent configuration YAML file.
+            checkpoint_path: Path to model checkpoint file.
+        
+        Returns:
+            Loaded policy model (PpoPlayerContinuous).
+        """
         with open(agent_yaml, "r") as f:
             agent_cfg = yaml.safe_load(f)
         agent_cfg["params"]["load_checkpoint"] = True
@@ -716,6 +792,25 @@ class RobotEnv(mp.Process):
                                 held_pos, held_mat, fixed_pos, fixed_mat,
                                 action_trans_out, action_gripper_out,
                                 device='cuda', offline=True):
+        """
+        Compute residual control observations from robot state and object poses.
+        
+        Args:
+            trans_out: End-effector transform dictionary.
+            gripper_out: Gripper state dictionary.
+            dt: Time delta since last observation.
+            held_pos: Position of held object (numpy array).
+            held_mat: Rotation matrix of held object (numpy array).
+            fixed_pos: Position of fixed object (numpy array).
+            fixed_mat: Rotation matrix of fixed object (numpy array).
+            action_trans_out: Commanded end-effector transform dictionary.
+            action_gripper_out: Commanded gripper state dictionary.
+            device: Device for tensor operations ('cuda' or 'cpu').
+            offline: Whether to use offline base actions from buffer (True) or online gello actions (False).
+        
+        Returns:
+            Tuple of (observations tensor (1,35), fixed_pos tensor, held_pos tensor, base_pos_delta tensor).
+        """
         curr_pos, fingertip_quat = trans_mat_to_pos_quat(trans_out["value"])
         gripper = gripper_raw_to_qpos(gripper_out["value"][0])
         eef_pos = torch.from_numpy(curr_pos).unsqueeze(0).to(device).to(torch.float32)
@@ -853,6 +948,18 @@ class RobotEnv(mp.Process):
         return obs, fixed_pos, held_pos, base_actions[:,:3]
 
     def apply_residual(self, residual, base_actions, qpos, device='cuda'):
+        """
+        Apply residual actions to base actions and convert to joint space commands.
+        
+        Args:
+            residual: Residual action tensor of shape (1,6) - [pos_delta (3), rot_delta (3)].
+            base_actions: Base action tensor of shape (1,8) - [pos (3), quat (4), gripper (1)].
+            qpos: Current joint positions for IK.
+            device: Device for tensor operations ('cuda' or 'cpu').
+        
+        Returns:
+            Tuple of (target_qpos numpy array (8,), goal_fingertip_pos tensor (1,3)).
+        """
         pos_actions = residual[:, 0:3] * torch.tensor([[0.03, 0.03, 0.03]], dtype=torch.float32).to(device)  # (1,3)
         rot_actions = residual[:, 3:6] * torch.tensor([[0.097, 0.097, 0.097]], dtype=torch.float32).to(device)  # (1,3)
 
@@ -899,7 +1006,13 @@ class RobotEnv(mp.Process):
         
         return target_qpos, goal_fingertip_pos
 
+    # ========== Main Process Loop ==========
+    
     def run(self) -> None:
+        """
+        Main process loop: handles action execution, state updates, data recording, and visualization.
+        Supports multiple action receivers: gello, keyboard, policy, replay, residual, residual_offline.
+        """
         robot_obs_record_dir = root / "logs" / self.data_dir / self.exp_name / "robot_obs"
         os.makedirs(robot_obs_record_dir, exist_ok=True)
 
@@ -1069,7 +1182,10 @@ class RobotEnv(mp.Process):
                             if timestep >= 300:
                                 print(f"Episode {eps_idx} finished after {timestep} timesteps")
                                 self.perception.set_record_stop()
-                                torch.save(obs_buf, env_obs_record_dir / f"env_obs_eps_{eps_idx}_real.pt")
+                                # TODO: Uncomment when env_obs_record_dir is needed
+                                # env_obs_record_dir = root / "logs" / self.data_dir / self.exp_name / "env_obs"
+                                # os.makedirs(env_obs_record_dir, exist_ok=True)
+                                # torch.save(obs_buf, env_obs_record_dir / f"env_obs_eps_{eps_idx}_real.pt")
                                 break
 
                         else:
@@ -1192,19 +1308,25 @@ class RobotEnv(mp.Process):
         self.stop()
         print("RealEnv process stopped")
 
+    # ========== Utility Methods ==========
+    
     def get_intrinsics(self):
+        """Get camera intrinsics from RealSense."""
         return self.realsense.get_intrinsics()
 
     def get_extrinsics(self):
+        """Get camera extrinsics from state dictionary."""
         return self.state["extr"]
 
     @property
     def alive(self) -> bool:
+        """Check if environment process and real environment are both alive."""
         alive = self._alive.value and self.real_alive
         self._alive.value = alive
         return alive
 
     def start(self) -> None:
+        """Start environment process: initialize real environment and image display, then start process."""
         self.start_time = time.time()
         self._alive.value = True
         self.real_start(time.time())
@@ -1212,5 +1334,6 @@ class RobotEnv(mp.Process):
         super().start()
 
     def stop(self) -> None:
+        """Stop environment process: set alive flag and stop real environment."""
         self._alive.value = False
         self.real_stop()

@@ -11,6 +11,7 @@ import os, sys, contextlib
 
 @contextlib.contextmanager
 def suppress_stdout():
+    """Context manager to suppress stdout and stderr output."""
     with open(os.devnull, "w") as devnull:
         old_stdout, old_stderr = sys.stdout, sys.stderr
         sys.stdout, sys.stderr = devnull, devnull
@@ -29,11 +30,15 @@ from robot_control.modules.common.xarm import *
 np.set_printoptions(precision=2, suppress=True)
 
 class Rate:
+    """Rate limiter for controlling loop execution frequency."""
+    
     def __init__(self, *, duration):
+        """Initialize rate limiter with target duration between sleeps."""
         self.duration = duration
         self.last = time.time()
 
     def sleep(self, duration=None) -> None:
+        """Sleep to maintain target rate, adjusting for elapsed time."""
         duration = self.duration if duration is None else duration
         assert duration >= 0
         now = time.time()
@@ -78,14 +83,17 @@ class XarmController(mp.Process):
 
 
     def log(self, msg):
+        """Print log message if verbose mode is enabled."""
         if self.verbose:
             self.pprint(msg)
             
-    def interpolate(self, a, b, alpha):  # linear in joint space
+    def interpolate(self, a, b, alpha):
+        """Linearly interpolate between two values in joint space."""
         return a + alpha * (b - a)
     
     @staticmethod
     def pprint(*args, **kwargs):
+        """Print formatted message with timestamp and caller information."""
         try:
             stack_tuple = traceback.extract_stack(limit=2)[0]
             print(
@@ -107,14 +115,13 @@ class XarmController(mp.Process):
         robot_id=0,
         control_mode="position_control",  # "position_control" or "velocity_control"
         robot_name="xarm7", # "xarm7" or "uf850"
-        teleop_robot_model_name="xarm7",
         admittance_control=False,
         ema_factor=1.0,
         gripper_enable=False,
         comm_update_fps=30.0,
         verbose=False,
     ):
-        
+        """Initialize XArm controller process with specified control mode, robot configuration, and communication settings."""
         self.robot_id = robot_id
         self.init_pose = init_pose
         self.init_servo_angle = init_servo_angle
@@ -126,8 +133,7 @@ class XarmController(mp.Process):
         self.ema_factor = ema_factor
         self.comm_update_fps = comm_update_fps
 
-        assert robot_name and teleop_robot_model_name in ["xarm7", "uf850"], "robot_name and teleop_robot_model_name must be xarm7 or uf850"
-        self.mismatch_kinematics = (robot_name != teleop_robot_model_name)
+        assert robot_name in ["xarm7", "uf850"], "robot_name must be xarm7 or uf850"
 
         # assert mode == "2D", "currently only support 2D mode"
         super().__init__()
@@ -158,8 +164,7 @@ class XarmController(mp.Process):
 
     # ======= xarm controller queue START =======
     def update_cur_position(self):
-        """ update the current position of the arm in a separate thread,
-        due to the unprecise of get_position API, use sapien fk to do the position closed loop"""
+        """Update current arm position in a separate thread using forward kinematics for accurate position tracking."""
 
         update_rate = Rate(
             duration=1/self.POSITION_UPDATE_FREQ,
@@ -224,16 +229,21 @@ class XarmController(mp.Process):
             # self.cur_gripper_q.close()
             print("update_cur_position exit!")
 
+    # NOTE: The following methods are not used externally but kept for potential future use
     def get_current_joint(self):
+        """Get current joint positions in radians (deep copy). Not used externally."""
         return copy.deepcopy(self.cur_qpos)
     
     def get_current_gripper(self):
+        """Get current gripper position (deep copy). Not used externally."""
         return copy.deepcopy(self.cur_gripper_pos)
 
     def get_current_joint_deg(self):
+        """Get current joint positions in degrees (deep copy). Not used externally."""
         return copy.deepcopy(self.cur_qpos) / np.pi * 180
 
     def get_current_pose(self):
+        """Get current end-effector pose (not implemented). Not used externally."""
         raise NotImplementedError
         return self.cur_xyzrpy
 
@@ -242,13 +252,15 @@ class XarmController(mp.Process):
 
     # ======= xarm SDK API wrapper START =======
     def open_gripper(self, wait=True):
+        """Open gripper to maximum openness."""
         return self.set_gripper_openness(self.GRIPPER_OPEN_MAX, wait=wait)
 
     def close_gripper(self, wait=True):
+        """Close gripper to minimum openness."""
         return self.set_gripper_openness(self.GRIPPER_OPEN_MIN, wait=wait)
 
-    # @DeprecationWarning
     def set_gripper_openness(self, openness, wait=True):
+        """Set gripper openness level and optionally wait for completion."""
         if not self.is_alive:
             raise ValueError("Robot is not alive!")
         code = self._arm.set_gripper_position(openness, wait=wait)
@@ -257,6 +269,7 @@ class XarmController(mp.Process):
         return True
 
     def get_gripper_state(self):
+        """Get current gripper position state."""
         if not self.is_alive:
             raise ValueError("Robot is not alive!")
         code, state = self._arm.get_gripper_position()
@@ -264,8 +277,8 @@ class XarmController(mp.Process):
             raise ValueError("get_gripper_position Error")
         return state
 
-    # Register error/warn changed callback
     def _error_warn_changed_callback(self, data):
+        """Callback for error/warning changes: sets alive to False on error."""
         if data and data["error_code"] != 0:
             self.alive = False
             self.pprint("err={}, quit".format(data["error_code"]))
@@ -273,19 +286,20 @@ class XarmController(mp.Process):
                 self._error_warn_changed_callback
             )
 
-    # Register state changed callback
     def _state_changed_callback(self, data):
+        """Callback for state changes: sets alive to False when state is 4 (emergency stop)."""
         if data and data["state"] == 4:
             self.alive = False
             self.pprint("state=4, quit")
             self._arm.release_state_changed_callback(self._state_changed_callback)
     
-    # Register count changed callback
     def _count_changed_callback(self, data):
+        """Callback for counter value changes: logs counter value if robot is alive."""
         if self.is_alive:
             self.pprint("counter val: {}".format(data["count"]))
 
     def _check_code(self, code, label):
+        """Check XArm API return code and handle errors by setting alive to False."""
         if not self.is_alive or code != 0:
             # import ipdb; ipdb.set_trace()
             self.alive = False
@@ -307,6 +321,7 @@ class XarmController(mp.Process):
 
     # ======= xarm control START =======
     def _init_robot(self):
+        """Initialize robot: set control mode, enable gripper if needed, and configure admittance control if enabled."""
         self._arm.clean_warn()
         self._arm.clean_error()
         self._arm.motion_enable(True)
@@ -389,6 +404,7 @@ class XarmController(mp.Process):
         self.state.value = ControllerState.RUNNING.value
 
     def preprocess_command(self, arm_state_goal, curr_arm_state):
+        """Preprocess command: check teleop activation and apply safety limits on joint deltas."""
         # check teleop activated
         delta = arm_state_goal - curr_arm_state # joint space + gripper
         joint_delta_norm = np.linalg.norm(delta)
@@ -409,9 +425,7 @@ class XarmController(mp.Process):
     # TODO: add reset method that main process can call
 
     def velocity_control(self, next_state, current_state, ema_factor=1.0, ignore_error=False):
-        """
-        streaming velocity targets
-        """
+        """Execute velocity control by sending streaming velocity targets to robot."""
         # NOTE: velocity control don't use ema
         # next_joints = ema_factor * next_joints + (1 - ema_factor) * current_joints
 
@@ -442,9 +456,7 @@ class XarmController(mp.Process):
             self._arm.clean_warn()
 
     def position_control(self, next_arm_goal, prev_arm_goal, next_gripper=None, ema_factor=0.5, ignore_error=True):
-        """
-        streaming position/servo targets
-        """
+        """Execute position control by sending streaming position/servo targets with EMA smoothing."""
         next_arm_goal = ema_factor * next_arm_goal + (1 - ema_factor) * prev_arm_goal
 
         # denormalize gripper position
@@ -470,8 +482,7 @@ class XarmController(mp.Process):
             
     # ======= xarm control END =======
     def enforce_z_down(self, fk: np.ndarray) -> np.ndarray:
-            """Modify fk so that its orientation has z-axis pointing down,
-            but keeps the closest possible yaw to the original orientation."""
+        """Modify forward kinematics transform to enforce z-axis pointing down while preserving yaw. Not used externally (commented out in run method)."""
             fk = fk.copy()
             R = fk[:3, :3]
 
@@ -499,8 +510,8 @@ class XarmController(mp.Process):
             R_new = np.column_stack([x_axis, y_axis, z_axis])
             fk[:3, :3] = R_new
             return fk
-    # ======= main thread loop =======
     def run(self):
+        """Main process loop: initialize robot, start position update thread, receive commands via UDP, and execute control."""
         # the arm initialization must be invoked in the same process
         print("Connecting to xarm at", self._ip)
         self._arm = XArmAPI(self._ip)
@@ -563,21 +574,6 @@ class XarmController(mp.Process):
                         curr_arm_state = np.array(self._arm.get_servo_angle()[1][0:7]) / 180. * np.pi
                         prev_arm_state = curr_arm_state
 
-                        # fk = self.teleop_kin_helper.compute_fk_sapien_links(arm_state_goal, [self.teleop_kin_helper.sapien_eef_idx])[0]
-                        # fk = self.enforce_z_down(fk)
-                        # goal_xyzrpy = np.zeros(6)
-                        # goal_xyzrpy[:3] = fk[:3, 3]
-                        # goal_xyzrpy[3:] = transforms3d.euler.mat2euler(fk[:3, :3])
-                        # arm_state_goal = self.teleop_kin_helper.compute_ik_sapien(curr_arm_state, goal_xyzrpy, verbose=False).tolist()
-
-                        if self.mismatch_kinematics: # TODO: currently only support xarm7 teleop 
-                            teleop_cart = self.teleop_kin_helper.compute_fk_sapien_links(command_state[:7], [self.teleop_kin_helper.sapien_eef_idx])[0] # compute fk with xarm7
-                            teleop_cart_euler = transforms3d.euler.mat2euler(teleop_cart[:3, :3], axes='sxyz')
-                            cart_comm = np.array(list(teleop_cart[:3, 3]) + list(teleop_cart_euler)).astype(np.float32)
-                            command = self.robot_kin_helper.compute_ik_sapien(current_joints, cart_comm) # compute ik with ur850
-                            if self.gripper_enable:
-                                command = np.concatenate([command, command_state[-1:]])
-
                         # check teleop activated and safety
                         next_arm_state = self.preprocess_command(arm_state_goal=arm_state_goal, curr_arm_state=curr_arm_state)
 
@@ -619,13 +615,12 @@ class XarmController(mp.Process):
         self.command_receiver.stop()
         print("xarm controller stopped")
 
-    # ======= process control =======
-    # Only the process created the API class can start and control the robot, init in the `run` function 
-    
     def start(self) -> None:
+        """Start the controller process."""
         return super().start()
     
     def stop(self):
+        """Stop the controller: disable force sensor, disconnect robot, and set state to STOP."""
         self.state.value = ControllerState.STOP.value
         self._arm.set_ft_sensor_mode(0)
         self._arm.set_ft_sensor_enable(0)

@@ -120,9 +120,11 @@ class ActionAgent(mp.Process):
         # self.gello_activated = False
 
     def log(self, msg):
+        """Print a log message with blue color formatting."""
         print(f"\033[94m{msg}\033[0m")
 
     def on_press(self,key):
+        """Handle keyboard key press events and update key states."""
         try:
             key_char = key.char.lower() if key.char else key.char
             if key_char in self.key_states:
@@ -131,6 +133,7 @@ class ActionAgent(mp.Process):
             pass
 
     def on_release(self,key):
+        """Handle keyboard key release events and update key states. Returns False on ESC to stop listener."""
         try:
             key_char = key.char.lower() if key.char else key.char
             if key_char in self.key_states:
@@ -140,8 +143,7 @@ class ActionAgent(mp.Process):
                 return False
 
     def enforce_z_down(self, fk: np.ndarray) -> np.ndarray:
-        """Modify fk so that its orientation has z-axis pointing down,
-        but keeps the closest possible yaw to the original orientation."""
+        """Modify forward kinematics transform to enforce z-axis pointing down while preserving yaw."""
         fk = fk.copy()
         R = fk[:3, :3]
 
@@ -170,7 +172,8 @@ class ActionAgent(mp.Process):
         fk[:3, :3] = R_new
         return fk
 
-    def get_command(self):        
+    def get_command(self):
+        """Process keyboard inputs and gello commands to generate joint commands based on action receiver mode."""
         if self.key_states["p"]:
             # abandon all other keyinputs
             self.pause = not self.pause
@@ -210,10 +213,7 @@ class ActionAgent(mp.Process):
         if self.pause:
             return
         else:
-            # 1. teleop 7dof
-            # 2. teleop 6dof
-            # 3. xy pushT
-            if self.joint_space_dim == 2:
+            if self.joint_space_dim == 2: # xy pushT
                 # compute eef pose of gello command
                 fk = self.kin_helper.compute_fk_sapien_links(command_joints[:7], [self.kin_helper.sapien_eef_idx])[0]
                 
@@ -230,28 +230,29 @@ class ActionAgent(mp.Process):
                 cur_xyzrpy[3:] = transforms3d.euler.mat2euler(fk[:3, :3])
                 next_joints = self.kin_helper.compute_ik_sapien(command_joints[:7], cur_xyzrpy, verbose=False).tolist()
 
-            else: # teleop 6dof
-                # fk = self.kin_helper.compute_fk_sapien_links(command_joints[:7], [self.kin_helper.sapien_eef_idx])[0]
-                # _, quat = trans_mat_to_pos_quat(fk)
+            elif self.action_receiver == "residual": # residual teleop
+                fk = self.kin_helper.compute_fk_sapien_links(command_joints[:7], [self.kin_helper.sapien_eef_idx])[0]
+                _, quat = trans_mat_to_pos_quat(fk)
 
-                # target_quat = torch.from_numpy(quat).unsqueeze(0)  # (1,4)
-                # euler_xyz = torch.stack(euler_xyz_from_quat(target_quat), dim =1)
-                # euler_xyz[:, 0] = 3.14159
-                # euler_xyz[:, 1] = 0.0
-                # target_quat = quat_from_euler_xyz(
-                #     roll=euler_xyz[:, 0],
-                #     pitch=euler_xyz[:, 1],
-                #     yaw=euler_xyz[:, 2]
-                # )
-                # mat = matrix_from_quat(target_quat[0]).numpy()
+                target_quat = torch.from_numpy(quat).unsqueeze(0)  # (1,4)
+                euler_xyz = torch.stack(euler_xyz_from_quat(target_quat), dim =1)
+                euler_xyz[:, 0] = 3.14159
+                euler_xyz[:, 1] = 0.0
+                target_quat = quat_from_euler_xyz(
+                    roll=euler_xyz[:, 0],
+                    pitch=euler_xyz[:, 1],
+                    yaw=euler_xyz[:, 2]
+                )
+                mat = matrix_from_quat(target_quat[0]).numpy()
 
-                # goal_xyzrpy = np.zeros(6)
-                # goal_xyzrpy[:3] = fk[:3, 3]
-                # goal_xyzrpy[3:] = transforms3d.euler.mat2euler(mat)
+                goal_xyzrpy = np.zeros(6)
+                goal_xyzrpy[:3] = fk[:3, 3]
+                goal_xyzrpy[3:] = transforms3d.euler.mat2euler(mat)
 
-                # next_joints = self.kin_helper.compute_ik_sapien(command_joints[:7], goal_xyzrpy, verbose=False).tolist()
-                # next_joints += [command_joints[7]]  # gripper
+                next_joints = self.kin_helper.compute_ik_sapien(command_joints[:7], goal_xyzrpy, verbose=False).tolist()
+                next_joints += [command_joints[7]]  # gripper
                 
+            else: # regular 7dof teleop
                 # direct joint mapping
                 next_joints = command_joints.tolist()
                 
@@ -259,6 +260,7 @@ class ActionAgent(mp.Process):
             return
 
     def run(self) -> None:
+        """Main process loop: initialize listeners, process commands, and send robot control commands via UDP."""
         if self.action_receiver == "gello" or self.action_receiver == "residual":
             gello_port = '/dev/ttyUSB0'
             baudrate = 57600
@@ -354,11 +356,13 @@ class ActionAgent(mp.Process):
     
     @property
     def alive(self):
+        """Check if the action agent process is still alive."""
         alive = self._alive.value 
         self._alive.value = alive
         return alive 
 
     def stop(self, stop_controller=False):
+        """Stop the action agent process and optionally send quit command to robot controllers."""
         if stop_controller:
             self.log("teleop stop controller")
             if self.command_sender is not None:
